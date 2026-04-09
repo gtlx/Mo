@@ -1,0 +1,23 @@
+{
+  "app": {
+    "title": "Desktop Pet",
+    "show": "Show",
+    "hide": "Hide",
+    "alwaysOnTop": "Always On Top",
+    "exit": "Exit",
+    "settings": "Settings",
+    "language": "Language"
+  },
+  "system": {
+    "cpu": "CPU",
+    "memory": "Memory",
+    "usage": "Usage",
+    "used": "Used",
+    "total": "Total"
+  },
+  "pet": {
+    "idle": "Idle",
+    "working": "Working",
+    "thinking": "Thinking"
+  }
+}

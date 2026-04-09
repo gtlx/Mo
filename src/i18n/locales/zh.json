@@ -1,0 +1,23 @@
+{
+  "app": {
+    "title": "桌面宠物",
+    "show": "显示",
+    "hide": "隐藏",
+    "alwaysOnTop": "置顶",
+    "exit": "退出",
+    "settings": "设置",
+    "language": "语言"
+  },
+  "system": {
+    "cpu": "CPU",
+    "memory": "内存",
+    "usage": "使用率",
+    "used": "已用",
+    "total": "总共"
+  },
+  "pet": {
+    "idle": "空闲中",
+    "working": "工作中",
+    "thinking": "思考中"
+  }
+}
