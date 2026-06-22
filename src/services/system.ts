@@ -17,6 +17,11 @@ export async function setWindowVisible(visible: boolean): Promise<void> {
   await invoke("set_window_visible", { visible });
 }
 
+/** 最小化到系统托盘 */
+export async function minimizeToTray(): Promise<void> {
+  await invoke("set_window_visible", { visible: false });
+}
+
 export async function toggleAlwaysOnTop(): Promise<boolean> {
   return await invoke<boolean>("toggle_always_on_top");
 }

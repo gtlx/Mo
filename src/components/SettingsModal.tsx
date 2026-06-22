@@ -4,7 +4,7 @@ interface Props {
   onClose: () => void;
   onChangeLanguage: (lang: string) => void;
   currentLanguage: string;
-  onHide: () => void;
+  onMinimize: () => void;
   onToggleTop: () => void;
   onExit: () => void;
 }
@@ -13,7 +13,7 @@ export default function SettingsModal({
   onClose,
   onChangeLanguage,
   currentLanguage,
-  onHide,
+  onMinimize,
   onToggleTop,
   onExit,
 }: Props) {
@@ -40,8 +40,8 @@ export default function SettingsModal({
             </select>
           </div>
           <div className="setting-item">
-            <button className="action-btn" onClick={onHide}>
-              {t("app.hide")}
+            <button className="action-btn" onClick={onMinimize}>
+              最小化到托盘
             </button>
             <button className="action-btn" onClick={onToggleTop}>
               {t("app.alwaysOnTop")}
@@ -49,6 +49,18 @@ export default function SettingsModal({
             <button className="action-btn danger" onClick={onExit}>
               {t("app.exit")}
             </button>
+          </div>
+          <div className="setting-item" style={{ marginBottom: 0 }}>
+            <p
+              style={{
+                fontSize: 11,
+                color: "#666",
+                textAlign: "center",
+                lineHeight: 1.5,
+              }}
+            >
+              最小化后可在系统托盘右键图标恢复窗口
+            </p>
           </div>
         </div>
       </div>

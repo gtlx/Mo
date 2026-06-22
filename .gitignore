@@ -2,4 +2,4 @@ node_modules/
 dist/
 target/
 src-tauri/gen/
-*.logsrc-tauri/Cargo.lock
+*.log

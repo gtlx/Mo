@@ -1,6 +1,10 @@
 import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { setWindowVisible, toggleAlwaysOnTop, closeApp } from "./services/system";
+import {
+  toggleAlwaysOnTop,
+  closeApp,
+  minimizeToTray,
+} from "./services/system";
 import Pet from "./components/Pet";
 import SystemInfoPanel from "./components/SystemInfoPanel";
 import SettingsModal from "./components/SettingsModal";
@@ -15,8 +19,8 @@ export default function App() {
     setShowPanel((prev) => !prev);
   }, []);
 
-  const handleHide = useCallback(async () => {
-    await setWindowVisible(false);
+  const handleMinimize = useCallback(async () => {
+    await minimizeToTray();
   }, []);
 
   const handleToggleTop = useCallback(async () => {
@@ -32,7 +36,7 @@ export default function App() {
       i18n.changeLanguage(lang);
       localStorage.setItem("language", lang);
     },
-    [i18n]
+    [i18n],
   );
 
   return (
@@ -44,7 +48,7 @@ export default function App() {
           onClose={() => setShowSettings(false)}
           onChangeLanguage={handleChangeLanguage}
           currentLanguage={i18n.language}
-          onHide={handleHide}
+          onMinimize={handleMinimize}
           onToggleTop={handleToggleTop}
           onExit={handleExit}
         />

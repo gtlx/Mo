@@ -16,8 +16,10 @@
     "total": "Total"
   },
   "pet": {
+    "sleeping": "Sleeping",
     "idle": "Idle",
+    "thinking": "Thinking",
     "working": "Working",
-    "thinking": "Thinking"
+    "overload": "Overload"
   }
 }

@@ -16,8 +16,10 @@
     "total": "总共"
   },
   "pet": {
+    "sleeping": "睡大觉",
     "idle": "空闲中",
+    "thinking": "思考中",
     "working": "工作中",
-    "thinking": "思考中"
+    "overload": "要炸了"
   }
 }
