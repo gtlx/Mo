@@ -270,3 +270,64 @@ cargo fmt / check     # 在 src-tauri 下,格式/检查
 - 宠物状态机改 `PetStatus` 时,同步更新 `styles.css` 对应动画 class。
 - 透明窗口下避免深色背景铺满,保持 `background: transparent`。
 - 内存型后台任务(监测线程)用 `AppState + Mutex` 缓存,命令只读缓存,不做同步 IO。
+
+---
+
+## 7. 分层架构规划(核心独立,远期方向)
+
+### 7.1 动机与目标
+
+应对三个诉求,结论先行:
+
+| 诉求 | 结论 |
+|---|---|
+| Linux + Windows 桌面 | 当前 Tauri 2 已跨平台,不构成换架构理由 |
+| 全栈 Rust(摆脱 JS/TS) | 可选路径:Slint / egui,不影响核心逻辑 |
+| 未来移植 ESP32 | **核心逻辑独立成 crate**,UI 层各自实现 |
+
+**核心原则**:把业务逻辑与 UI 框架解耦,让"换 UI"和"移植新平台"不触碰核心代码。
+
+### 7.2 目标结构
+
+```
+mo-core(平台无关 Rust crate,核心逻辑)
+├─ pet/state.rs       宠物状态机:CPU 阈值 → PetStatus(现有 getStatus 纯函数化)
+├─ store/             记忆库(sessions/messages/memories,表结构见 5.3)
+├─ chat/              AI 对话客户端(OpenAI 兼容,配置由 UI 层注入)
+└─ sysinfo/           SystemInfoProvider trait(抽象系统信息采集)
+    ├─ desktop 实现   sysinfo 库(现有 monitor.rs 逻辑)
+    └─ embedded 实现  传感器/低资源环境(远期 ESP32)
+
+各端 UI(依赖 mo-core):
+├─ desktop 桌面       当前 Tauri 2 + React(远期可换 Slint/egui,不动 core)
+└─ embedded 嵌入式    LCD + 简化动画(Slint MCU / embedded-graphics,远期)
+```
+
+### 7.3 依赖方向与约束
+
+- **单向依赖**:UI 层 → 核心层。核心层禁止依赖 tauri / webview / React。
+- **trait 抽象**:系统信息采集(`SystemInfoProvider`)与持久化(`MemoryStore`)用 trait,桌面(线程 + SQLite)与嵌入式(传感器 + Flash)各提供实现。
+- **配置注入**:LLM 的 `BASE_URL/API_KEY/MODEL` 由 UI 层读取后传入核心层,核心层不碰环境变量与密钥。
+- **状态机纯函数**:`getStatus(cpu) -> PetStatus` 为纯函数,不依赖任何平台能力,天然可移植。
+
+### 7.4 分步迁移(不阻塞当前功能)
+
+| # | 步骤 | 涉及内容 | 是否阻塞现有开发 |
+|---|---|---|---|
+| 1 | 新建 `mo-core` crate,把系统信息抽象成 `SystemInfoProvider` trait,抽出纯函数状态机 | 现有 `app.rs` 的监测逻辑 | 否,纯增量 |
+| 2 | 记忆库 `store/`(第 5 节表结构)移入核心层 | DEV.md 5.4 的 store 模块 | 否,按原规划做,落点改为 core |
+| 3 | AI 对话客户端 `chat/` 移入核心层 | DEV.md 5.4 的 chat 模块 | 否,同 store |
+| 4 | Tauri 层瘦身为壳:只留窗口、托盘、命令转发,业务都调 core | `src-tauri/src/` | 在 P1-P3 之后 |
+| 5 | (远期)新增 ESP32 前端,复用核心层 | esp-hal + LCD | 不启动,仅规划 |
+
+### 7.5 对现有规划的影响
+
+- **记忆系统(第 5 节)天然属于核心层**——数据表与 AI 客户端本来就是平台无关 Rust,现有 P1-P3 规划按原样实施,只调整落点目录。
+- **换 UI 框架不破坏核心逻辑**:若日后从 React 迁到 Slint/egui,只需重写第 2 节前端层与 Tauri 壳,core 不动。
+- **分步迁移 Step 1-3 都是增量**:不删除现有代码,只是把逻辑搬进独立 crate,当前功能持续可运行。
+
+### 7.6 决策要点
+
+- 本规划是**远期方向**,不阻塞当前开发。P1-P3 记忆/AI 功能仍按第 5 节在现有架构上实施。
+- 是否换纯 Rust UI(Slint/egui)取决于需求定夺(A 全栈 Rust / B 仅跨平台 / C 认真做 ESP32),定夺前不动 UI 层。
+- ESP32 是另一个世界(微控制器 + LCD),移植的是核心逻辑而非 UI。
