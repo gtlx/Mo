@@ -21,14 +21,19 @@ src/                          # 前端(React + TS)
 ├── App.tsx                   主应用:状态协调、宠物/面板/设置开关
 ├── main.tsx                  入口
 ├── components/               UI 组件
-│   ├── Pet.tsx               宠物(5 态状态机 → CSS 动画)
+│   ├── Pet.tsx               宠物(渲染器驱动:业务状态 → PetRenderer,不绘制五官)
 │   ├── SystemInfoPanel.tsx   系统信息面板(进度条)
 │   └── SettingsModal.tsx     设置弹窗(语言/置顶/最小化/退出)
+├── renderers/                渲染器抽象层(P1-3 新增,为 Live2D/Spine 预留)
+│   ├── types.ts              PetManifest(协议)+ PetRenderer 接口
+│   ├── sprite-renderer.ts    精灵图渲染器:canvas 帧动画 + 分层状态机 + 自然动效
+│   └── index.ts              createRenderer 工厂:按 manifest.type 分发
+├── assets/pets/<pet-id>/     宠物素材库(每宠物一个目录:pet.json + spritesheet.png + index.ts)
 ├── hooks/useSystemInfo.ts    数据轮询 hooks(useCpuUsage 等)
 ├── services/system.ts        Tauri 命令封装层(唯一调 invoke 的地方)
 ├── i18n/                     国际化(locales/zh.json · en.json)
-├── types/index.ts            共享类型
-└── styles.css                全部样式(CSS 宠物五官 + keyframes)
+├── types/index.ts            共享类型(PetStatus/SystemInfo 等)
+└── styles.css                样式(布局/气泡/面板;宠物五官动画已迁入渲染器)
 
 src-tauri/src/                # 后端(Rust)
 ├── app.rs                    命令 + 后台监测 + 托盘 + 窗口控制 + 入口
@@ -44,6 +49,71 @@ Rust:后台线程轮询 sysinfo → 写入 AppState(Mutex 缓存) → 命令读�
 ```
 
 关键机制:Rust 后台线程每 1s 轮询 CPU/内存写入 `AppState` 的 `Mutex`;前端每 1–2s 通过命令读缓存,前端零阻塞。
+
+### 2.3 渲染器抽象层(P1-3 落地,精灵图 + 自然动效)
+
+> P1-3 把宠物渲染从「CSS 五官 + 5 态切换」升级为「渲染器抽象层 + 精灵图」,并为将来演进 Live2D / Spine 预留了统一接口。素材与渲染技术彻底解耦:**换宠物 = 换素材目录,不改代码;换渲染技术 = 新增渲染器,组件零改动。**
+
+#### 分层结构
+
+```
+src/renderers/
+├── types.ts              PetManifest(宠物清单协议)+ PetRenderer(渲染器统一接口)
+├── sprite-renderer.ts    SpriteRenderer:canvas 帧动画 + 分层状态机 + 微动效 + 平滑过渡
+└── index.ts              createRenderer(manifest) 工厂:按 type 分发,未知/未实现回退 sprite 并告警
+
+src/assets/pets/<pet-id>/   一个宠物 = 一个目录(素材可更换设计)
+├── spritesheet.png       精灵图(等尺寸网格,TexturePacker 标准导出可直接用)
+├── pet.json              完整协议声明(见下)
+└── index.ts              把相对路径解析成 vite 资源 URL,导出 PetManifest
+```
+
+#### PetRenderer 接口(渲染技术无关)
+
+```ts
+interface PetRenderer {
+  mount(container: HTMLElement): void;  // 创建 canvas 等 DOM 并插入容器,启动渲染循环
+  play(state: PetStatus): void;         // 播放业务状态(分层状态机入口,内部映射状态行)
+  greet?(): void;                       // 可选:交互反馈动画(如点击挥手)
+  destroy(): void;                      // 停止循环、移除 DOM、释放资源
+}
+```
+
+- `Pet.tsx` **只依赖 `createRenderer` + `PetRenderer`**,不感知渲染技术;`manifest.type` 为 `live2d` / `spine` 时工厂告警并回退 sprite(旧版应用面对升级后的 manifest 不崩)。
+- 渲染循环用 `requestAnimationFrame` 驱动 canvas 原生绘制,**不触发 React re-render**。
+
+#### pet.json 协议(完整字段)
+
+| 字段 | 说明 | 默认值 |
+|---|---|---|
+| `id` / `displayName` / `description` | 宠物标识与展示信息 | — |
+| `type` | 渲染类型:`"sprite"`(已实现)/ `"live2d"` / `"spine"`(预留) | `sprite` |
+| `spritesheetPath` | 精灵图路径(vite 下解析为资源 URL) | — |
+| `frameWidth` / `frameHeight` | 单帧尺寸(px) | 192 / 208 |
+| `framesPerRow` | 精灵图每行帧数(列数) | 8 |
+| `framesPerState` | 每状态最多播放帧数(上限;渲染器按像素内容自动检测有效帧,空帧自动截断) | 取 `framesPerRow` |
+| `stateRows` | 状态 → 行号映射(行 = 状态,列 = 帧动画) | Codex 九行分类法 |
+| `loopMs` | 单个状态完整循环时长(ms) | 1100 |
+| `scale` | 显示缩放(相对原始帧) | 0.33 |
+
+首发宠物 `qqpet-codex`:`frameWidth/frameHeight = 192×208`、`framesPerRow = 8`(8 列 × 9 行)、`stateRows` 九行(idle / running-right / running-left / waving / jumping / failed / waiting / running / review)、`loopMs = 1100`、`scale = 0.4`。
+
+#### 分层状态机与自然动效(核心诉求「还原 QQ 宠物自然感」)
+
+1. **分层状态机**:业务状态(`PetStatus`)→ 精灵图行名(`STATUS_TO_ROW`)→ 行号/帧号,上层只管业务状态。映射:`sleeping/idle → idle 行`、`thinking → waiting 行`、`working → running 行`、`overload → jumping 行`。
+2. **微动效叠加**:呼吸(scaleY 正弦起伏,每状态独立幅度/周期/随机初相)+ 眨眼(2.6~5.2s 随机触发,150ms 压扁闭合;状态切换**不重置眨眼计时**,否则频繁切换会无限推迟眨眼)。
+3. **平滑过渡**:状态切换淡入 180ms;行不变(如 sleeping/idle 同用 idle 行)只换节奏不重启循环。
+4. **节奏自然化**:`easeInOutSine` 映射帧位置(起步/收步稍停、中间流畅)+ 每状态独立 `loopScale`(sleeping 放慢 1.6×、overload 加快 0.7×)。
+
+#### 演进路径(Live2D / Spine)
+
+- 新增 `live2d-renderer.ts` / `spine-renderer.ts`,实现同一 `PetRenderer` 接口,在 `createRenderer` 工厂的 `switch` 中注册即可;
+- `Pet.tsx` 与协议层(`PetManifest`)零改动,只需把宠物目录换成 Live2D 模型 + 对应 `type` 的 manifest。
+
+#### 素材可更换设计
+
+- 宠物 = 一个目录(spritesheet + pet.json 声明帧尺寸/状态行/循环时间/缩放),渲染器只认协议,**不硬编码任何宠物长相**;
+- 换宠物 = 换目录(参考 `src/assets/pets/qqpet-codex/`),不改代码。
 
 ## 3. 模块化评估与改进计划
 
@@ -67,10 +137,10 @@ Rust:后台线程轮询 sysinfo → 写入 AppState(Mutex 缓存) → 命令读�
 |---|---|---|---|
 | 1 | **弹出覆盖窗口**(收益最大) | shift-click 把宠物弹到独立透明置顶窗,可拖拽、位置持久化、主窗最小化后仍可见 | Tauri 配置与命令能力已具备,加第二个透明置顶窗口即可 |
 | 2 | **完整手势表** | 拖拽移动 / 单击 / 双击 / shift-click 各司其职 | 目前单击与右键同一动作;至少补拖拽 + 位置 localStorage 持久化 |
-| 3 | **精灵图替换 CSS 五官** | 状态 → sprite 行 → 帧动画,换宠物只换图集 | 抽 `PetStatus → spriteRow → 帧`,DOM 放 img/canvas 而非 CSS 五官 |
+| 3 | **精灵图替换 CSS 五官** | 状态 → sprite 行 → 帧动画,换宠物只换图集 | ✅ **已落地(P1-3)**:渲染器抽象层 + qqpet-codex,详见 2.3 |
 | 4 | **状态与渲染解耦** | 漫游用命令式 el.style,settle 才 commit React | CPU 轮询降频;数字气泡独立组件,避免整只宠物每帧 re-render |
 | 5 | **阈值告警通知** | 任务完成 → 浮出 mail 图标,点击回到线程 | CPU/内存超阈值 → 警示动画 + 系统通知,让监控"有用" |
-| 6 | **点击抚摸反馈** | 词表匹配"good bot"飘爱心(零模型调用) | 点击/抚摸宠物 → 撒娇动画 |
+| 6 | **点击抚摸反馈** | 词表匹配"good bot"飘爱心(零模型调用) | ✅ **部分落地(P1-3)**:点击触发 waving 行挥手动画(greet),飘爱心留待 P1-6 |
 
 **明确不借鉴**:CLI/TUI 渲染、3200+ 宠物画廊生态、roam 漫游(surface 感知跳跃依赖 DOM 度量)、多 agent 网关。
 
@@ -264,10 +334,13 @@ cargo fmt / check     # 在 src-tauri 下,格式/检查
 3. **新数据轮询**:参照 `useCpuUsage` 模式(useEffect + setInterval + 失败静默)。
 4. **新文案**:加进 `src/i18n/locales/zh.json` 与 `en.json`,用 `t("key")` 引用,不硬编码。
 5. **新持久化**:放 Rust 端,不要用 localStorage 存应用逻辑数据(语言偏好等轻配置除外)。
+6. **新宠物素材**:在 `src/assets/pets/<pet-id>/` 新建目录(pet.json 按 2.3 协议声明帧尺寸/状态行/循环时间/缩放 + spritesheet.png + index.ts 导出 manifest),组件零改动。
+7. **新渲染技术(Live2D/Spine)**:新建渲染器实现 `PetRenderer` 接口,在 `src/renderers/index.ts` 工厂注册;`Pet.tsx` 不动。
 
 ### 约定
 
-- 宠物状态机改 `PetStatus` 时,同步更新 `styles.css` 对应动画 class。
+- 宠物外观/动画一律收敛到渲染器,`styles.css` 只负责布局与面板;**不要**回到 CSS 五官/动画方案。
+- 宠物渲染循环用 `requestAnimationFrame` + canvas,不触发 React re-render;改渲染器时保持该约定。
 - 透明窗口下避免深色背景铺满,保持 `background: transparent`。
 - 内存型后台任务(监测线程)用 `AppState + Mutex` 缓存,命令只读缓存,不做同步 IO。
 

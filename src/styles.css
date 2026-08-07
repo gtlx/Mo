@@ -21,18 +21,15 @@ body,
   overflow: hidden;
 }
 
-/* ══════════ 宠物主体 ══════════ */
+/* ══════════ 宠物主体(精灵图渲染器挂载区) ══════════ */
 
 .pet {
-  width: 120px;
-  height: 120px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   user-select: none;
-  transition: transform 0.1s;
   position: absolute;
   bottom: 20px;
   left: 50%;
@@ -47,171 +44,18 @@ body,
   transform: translateX(-50%) scale(0.95);
 }
 
-.pet-body {
-  width: 80px;
-  height: 80px;
-  background: linear-gradient(135deg, #ff9a56 0%, #ff6b35 100%);
-  border-radius: 50% 50% 45% 45%;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 12px rgba(255, 107, 53, 0.4);
-  transition: box-shadow 0.3s;
-}
-
-/* ══════════ 各状态动画 ══════════ */
-
-.pet-sleeping .pet-body {
-  animation: breath 3s ease-in-out infinite;
-  box-shadow: 0 4px 12px rgba(100, 149, 237, 0.3);
-  background: linear-gradient(135deg, #a8c0ff 0%, #3f6ef0 100%);
-}
-
-.pet-idle .pet-body {
-  animation: bounce 2s ease-in-out infinite;
-}
-
-.pet-thinking .pet-body {
-  animation: float 1.5s ease-in-out infinite;
-}
-
-.pet-working .pet-body {
-  animation: shake 0.3s ease-in-out infinite;
-}
-
-.pet-overload .pet-body {
-  animation: shake 0.15s ease-in-out infinite;
-  box-shadow: 0 4px 20px rgba(255, 50, 50, 0.6);
-  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
-}
-
-/* ══════════ 眼睛 ══════════ */
-
-.pet-eyes {
-  display: flex;
-  gap: 14px;
-  margin-bottom: 6px;
-  align-items: center;
-}
-
-.eye {
-  width: 12px;
-  height: 14px;
-  background: #333;
-  border-radius: 50%;
-  position: relative;
-}
-
-.eye::after {
-  content: "";
-  position: absolute;
-  width: 4px;
-  height: 4px;
-  background: white;
-  border-radius: 50%;
-  top: 3px;
-  right: 2px;
-}
-
-/* 瞇眼（thinking） */
-.eye.squint {
-  width: 10px;
-  height: 6px;
-  border-radius: 4px;
-  background: #333;
-}
-
-.eye.squint::after {
-  display: none;
-}
-
-/* 闭眼（sleeping） */
-.eye.closed {
-  width: 14px;
-  height: 4px;
-  border-radius: 2px;
-  background: #555;
+/* 精灵图 canvas 挂载容器:尺寸由渲染器按帧尺寸×缩放生成 */
+.pet-sprite {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  line-height: 1;
-  color: #555;
+  line-height: 0;
 }
 
-.eye.closed::after {
-  display: none;
-}
-
-/* 警告（overload） */
-.eye.overload {
-  width: 14px;
-  height: 14px;
-  background: #ff0;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 900;
-  color: #d00;
-  line-height: 1;
-}
-
-.eye.overload::after {
-  display: none;
-}
-
-/* ══════════ 嘴巴 ══════════ */
-
-.pet-mouth {
-  width: 16px;
-  height: 8px;
-  border-bottom: 3px solid #333;
-  border-radius: 0 0 50% 50%;
-  transition: all 0.3s;
-}
-
-.mouth-sleeping {
-  width: 10px;
-  height: 4px;
-  border-bottom: 2px solid #555;
-  border-radius: 0;
-}
-
-.mouth-thinking {
-  width: 14px;
-  height: 6px;
-  border-bottom: 2px solid #333;
-  border-radius: 0 0 40% 40%;
-}
-
-.mouth-working {
-  width: 14px;
-  height: 3px;
-  border: none;
-  border-top: 3px solid #333;
-  border-radius: 2px;
-}
-
-.mouth-overload {
-  width: 14px;
-  height: 3px;
-  border: none;
-  background: #333;
-  border-radius: 2px;
-}
-
-/* ══════════ Zzz（睡觉） ══════════ */
-
-.pet-zzz {
-  position: absolute;
-  top: -12px;
-  right: -10px;
-  font-size: 14px;
-  animation: floatUp 2s ease-in-out infinite;
+.pet-sprite canvas {
+  display: block;
+  image-rendering: auto;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.18));
 }
 
 /* ══════════ CPU 气泡 ══════════ */
@@ -227,34 +71,6 @@ body,
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   min-width: 36px;
   text-align: center;
-}
-
-/* ══════════ 动画关键帧 ══════════ */
-
-@keyframes bounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
-}
-
-@keyframes shake {
-  0%, 100% { transform: rotate(0deg); }
-  25% { transform: rotate(-4deg); }
-  75% { transform: rotate(4deg); }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  50% { transform: translateY(-5px) rotate(2deg); }
-}
-
-@keyframes breath {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.04); }
-}
-
-@keyframes floatUp {
-  0% { opacity: 1; transform: translateY(0); }
-  100% { opacity: 0; transform: translateY(-16px); }
 }
 
 /* ══════════ 信息面板 ══════════ */

@@ -56,10 +56,23 @@
 |---|---|---|---|---|---|---|
 | P1-1 | **弹出覆盖窗**(收益最大) | 新增第二个透明置顶无边框窗口(如 160×160),宠物可从主窗「弹出」到独立窗,可拖拽、位置持久化;主窗最小化后覆盖窗仍在 | `src-tauri/tauri.conf.json`(加窗口)、`src-tauri/src/app.rs` 或拆分后 `window.rs`(新命令 `spawn_popup`/`move_popup`)、`src/components/PopupPet.tsx`(复用 Pet 渲染) | 无 | M | 桌面调试(多窗口/置顶/位置持久化);web 调试只能验证 PopupPet 组件本身 |
 | P1-2 | **手势表** | 拖拽移动(pointer 事件)+ 位置 localStorage 持久化;单击/双击分离(单击切换面板、双击弹出窗口);右键改菜单而非同一动作 | `src/components/Pet.tsx`、`src/App.tsx`、`src/styles.css` | 无 | S–M | web 调试:拖拽、双击、位置刷新后保留,全可验证 |
-| P1-3 | **精灵图替换 CSS 五官** | `PetStatus → spriteRow → 帧`映射;DOM 从 CSS 五官改 `img`/`canvas` 帧动画;换宠物只换图集 | 新建 `src/assets/pet/`、`src/components/Pet.tsx`、`src/styles.css` | **需外部素材**:宠物 sprite 图集(如每态 2–4 帧,PNG 即可);未提供前保留 CSS 五官作 fallback | M | web 调试:状态切换帧动画;素材未到则本项挂起 |
+| P1-3 | **精灵图替换 CSS 五官** | ✅ **已完成(2026-08-08)**,见下方「P1-3 落地记录」 | `src/renderers/`(新建)、`src/assets/pets/qqpet-codex/`(新建)、`src/components/Pet.tsx`、`src/styles.css`、`src/vite-env.d.ts` | 素材已就位:qqpet-codex(来自 `~/.hermes/pets/qqpet-codex/`) | M | ✅ `pnpm build` 0 error;web 调试帧动画/眨眼/呼吸/greet 挥手;`cargo check` 通过(虚拟机) |
 | P1-4 | **状态渲染解耦** | CPU 轮询降频(气泡 1s → 2s);CPU 数字气泡独立成组件,状态切换才重渲染宠物主体 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | web 调试 + React DevTools 观察 re-render 范围缩小 |
 | P1-5 | **阈值告警通知** | Rust 监测线程加阈值判断(CPU/内存超线)→ 系统通知 + 宠物警示动画;点击通知回到应用 | `src-tauri/Cargo.toml`、新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src/App.tsx`、`src/styles.css` | `tauri-plugin-notification` crate;平台通知权限(Linux 需通知 daemon) | M | 桌面调试(真实通知);警示动画 web 可验 |
 | P1-6 | **抚摸反馈** | 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端词表/动作触发,零模型调用) | `src/components/Pet.tsx`、`src/styles.css` | 无 | S | web 调试:点击出爱心动画 |
+
+**P1-3 落地记录(2026-08-08,已完成并验证)**:
+
+- **实现**:渲染器抽象层 `src/renderers/`(types.ts 协议+接口 / sprite-renderer.ts canvas 帧动画 / index.ts 工厂分发)+ 首发宠物 `src/assets/pets/qqpet-codex/`(pet.json + spritesheet.png + index.ts);`Pet.tsx` 从 CSS 五官改造为「业务状态 → PetRenderer」桥接,点击触发 waving 挥手(greet)。
+- **素材规格**:qqpet-codex 精灵图 **1536×1872**(帧 **192×208**,**8 列 × 9 行**),`stateRows` 九行映射(idle/running-right/running-left/waving/jumping/failed/waiting/running/review),`loopMs=1100`,`scale=0.4`。
+- **状态行映射**(业务语义 → 动作语义):sleeping/idle → idle 行、thinking → waiting 行、working → running 行、overload → jumping 行。
+- **自然动效**:呼吸(scaleY 正弦,每状态独立幅度/周期/初相)+ 眨眼(2.6~5.2s 随机,150ms 闭合,状态切换不重置计时)+ 状态切换淡入 180ms + easeInOutSine 帧节奏。
+- **与计划的差异**:
+  1. 新增 `framesPerState` 协议字段(计划未定义)——每状态最多播帧数的上限,配合「像素内容自动检测有效帧、空帧截断」适配各行帧数不一(如 idle 行 6 帧有效、failed 行静态);
+  2. 素材目录为 `src/assets/pets/<id>/`(计划写 `src/assets/pet/`,按「一宠物一目录」命名);
+  3. `framesPerRow=8`、`scale=0.4`(非 Hermes 默认 6 帧 / 0.33,按素材实测设定);
+  4. 渲染器循环用 requestAnimationFrame 驱动 canvas,不触发 React re-render(延续 P0-5 思路,强于计划的 img 方案);
+  5. 未做 CSS 五官 fallback(素材已到位,直接替换)。
 
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。

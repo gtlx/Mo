@@ -1,0 +1,24 @@
+{
+  "id": "qqpet-codex",
+  "displayName": "QQpet-codex",
+  "description": "QQPet Codex 定制企鹅:方向性跑步、大幅挥手、乐器检查 review 动画,作为 Mo 首发宠物",
+  "type": "sprite",
+  "spritesheetPath": "spritesheet.png",
+  "frameWidth": 192,
+  "frameHeight": 208,
+  "framesPerRow": 8,
+  "framesPerState": 8,
+  "stateRows": {
+    "idle": 0,
+    "running-right": 1,
+    "running-left": 2,
+    "waving": 3,
+    "jumping": 4,
+    "failed": 5,
+    "waiting": 6,
+    "running": 7,
+    "review": 8
+  },
+  "loopMs": 1100,
+  "scale": 0.4
+}

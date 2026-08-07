@@ -1,6 +1,6 @@
 [package]
 name = "desktop-pet"
-version = "1.0.0"
+version = "0.1.0"
 description = "跨平台桌面宠物"
 authors = ["you"]
 edition = "2021"
