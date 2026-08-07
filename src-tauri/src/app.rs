@@ -87,9 +87,9 @@ fn start_monitor(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut sys = System::new_all();
         loop {
-            sys.refresh_cpu();
+            sys.refresh_cpu_all();
             std::thread::sleep(Duration::from_millis(1000));
-            sys.refresh_cpu();
+            sys.refresh_cpu_all();
             sys.refresh_memory();
 
             let cpu_usage = sys.global_cpu_usage();

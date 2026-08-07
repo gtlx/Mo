@@ -19,16 +19,31 @@ export default function App() {
     setShowPanel((prev) => !prev);
   }, []);
 
+  /** 最小化到系统托盘(web 调试下为 no-op,失败仅记日志不抛出) */
   const handleMinimize = useCallback(async () => {
-    await minimizeToTray();
+    try {
+      await minimizeToTray();
+    } catch (e) {
+      console.error("最小化到托盘失败:", e);
+    }
   }, []);
 
+  /** 切换窗口置顶(web 调试下为 no-op) */
   const handleToggleTop = useCallback(async () => {
-    await toggleAlwaysOnTop();
+    try {
+      await toggleAlwaysOnTop();
+    } catch (e) {
+      console.error("切换置顶失败:", e);
+    }
   }, []);
 
+  /** 退出应用(web 调试下为 no-op) */
   const handleExit = useCallback(async () => {
-    await closeApp();
+    try {
+      await closeApp();
+    } catch (e) {
+      console.error("退出应用失败:", e);
+    }
   }, []);
 
   const handleChangeLanguage = useCallback(

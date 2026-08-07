@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useCpuUsage } from "../hooks/useSystemInfo";
+import type { PetStatus } from "../types";
 
+/** 宠物组件对外接口:点击 / 右键均触发同一回调(切换信息面板) */
 interface PetProps {
   onClick: () => void;
 }
 
-type PetStatus = "sleeping" | "idle" | "thinking" | "working" | "overload";
-
+/**
+ * 根据 CPU 使用率映射宠物状态(阈值与 types 中 PetStatus 注释一致)
+ * 负载越低越安静:overload → working → thinking → idle → sleeping
+ */
 function getStatus(cpu: number): PetStatus {
   if (cpu > 80) return "overload";
   if (cpu > 50) return "working";
