@@ -55,9 +55,9 @@
 | # | 借鉴点 | 落地内容 | 涉及文件 | 依赖 | 工作量 | 验证 |
 |---|---|---|---|---|---|---|
 | P1-1 | **弹出覆盖窗**(收益最大) | 新增第二个透明置顶无边框窗口(如 160×160),宠物可从主窗「弹出」到独立窗,可拖拽、位置持久化;主窗最小化后覆盖窗仍在 | `src-tauri/tauri.conf.json`(加窗口)、`src-tauri/src/app.rs` 或拆分后 `window.rs`(新命令 `spawn_popup`/`move_popup`)、`src/components/PopupPet.tsx`(复用 Pet 渲染) | 无 | M | 桌面调试(多窗口/置顶/位置持久化);web 调试只能验证 PopupPet 组件本身 |
-| P1-2 | **手势表** | 拖拽移动(pointer 事件)+ 位置 localStorage 持久化;单击/双击分离(单击切换面板、双击弹出窗口);右键改菜单而非同一动作 | `src/components/Pet.tsx`、`src/App.tsx`、`src/styles.css` | 无 | S–M | web 调试:拖拽、双击、位置刷新后保留,全可验证 |
+| P1-2 | **手势表** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、`src/App.tsx`、`src/styles.css` | 无 | S–M | ✅ `pnpm build` 0 error;web 调试:拖拽、双击挥手、右键菜单、位置刷新后保留 |
 | P1-3 | **精灵图替换 CSS 五官** | ✅ **已完成(2026-08-08)**,见下方「P1-3 落地记录」 | `src/renderers/`(新建)、`src/assets/pets/qqpet-codex/`(新建)、`src/components/Pet.tsx`、`src/styles.css`、`src/vite-env.d.ts` | 素材已就位:qqpet-codex(来自 `~/.hermes/pets/qqpet-codex/`) | M | ✅ `pnpm build` 0 error;web 调试帧动画/眨眼/呼吸/greet 挥手;`cargo check` 通过(虚拟机) |
-| P1-4 | **状态渲染解耦** | CPU 轮询降频(气泡 1s → 2s);CPU 数字气泡独立成组件,状态切换才重渲染宠物主体 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | web 调试 + React DevTools 观察 re-render 范围缩小 |
+| P1-4 | **状态渲染解耦** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | ✅ `pnpm build` 0 error;web 调试:气泡 2s 实时刷新,宠物仅状态切换才更新 |
 | P1-5 | **阈值告警通知** | Rust 监测线程加阈值判断(CPU/内存超线)→ 系统通知 + 宠物警示动画;点击通知回到应用 | `src-tauri/Cargo.toml`、新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src/App.tsx`、`src/styles.css` | `tauri-plugin-notification` crate;平台通知权限(Linux 需通知 daemon) | M | 桌面调试(真实通知);警示动画 web 可验 |
 | P1-6 | **抚摸反馈** | 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端词表/动作触发,零模型调用) | `src/components/Pet.tsx`、`src/styles.css` | 无 | S | web 调试:点击出爱心动画 |
 
@@ -73,6 +73,16 @@
   3. `framesPerRow=8`、`scale=0.4`(非 Hermes 默认 6 帧 / 0.33,按素材实测设定);
   4. 渲染器循环用 requestAnimationFrame 驱动 canvas,不触发 React re-render(延续 P0-5 思路,强于计划的 img 方案);
   5. 未做 CSS 五官 fallback(素材已到位,直接替换)。
+
+**P1-2/P1-4 落地记录(2026-08-08,已完成并验证)**:
+
+- **P1-2 手势表**:`Pet.tsx` 完整手势表——拖拽(pointer 事件 + `setPointerCapture`,位移 > 5px 判定,结束写入 `localStorage` key `mo.pet.position`,边界 clamp 可视区)、单击/双击分离(单击延迟 250ms 判定切面板,双击取消挂起单击并触发 greet 挥手,拖拽后 click 用 ref 抑制)、右键(阻止默认菜单,上报坐标由 App 层弹自定义菜单:设置/退出 + 屏幕边缘 clamp + 全屏遮罩点击关闭);`styles.css` 增 `.pet.positioned` / `.pet.dragging` / `.context-menu*` 样式。纯前端,零 Rust 改动。
+- **P1-4 状态渲染解耦**:`usePolling` 新增 `isEqual` 参数(值相等不 setState,保留旧引用);新增 `usePetStatus`(2s 轮询,`getStatus(await getCpuUsage())` 映射离散状态,`isEqual: (a,b) => a===b`——同一状态区间内波动宠物主体零 re-render);新增 `CpuBubble` 独立组件(自持 `useCpuUsage(2000)`,数据变化只更新气泡)。宠物主体状态驱动、气泡 CPU 驱动,彻底分离。
+- **与计划的差异**:
+  1. **usePetStatus + isEqual 优于计划**:计划只写「降频 + 气泡独立组件」,实际额外实现「状态值相等不 setState」,宠物主体从「2s 更新一次」进一步降到「仅跨阈值切换时更新」;
+  2. 双击行为改为「挥手动画 + 独立覆盖窗占位 no-op」:P1-1 覆盖窗未落地,双击暂不弹窗(TODO 标注),待 P1-1 实现后接入;
+  3. 右键菜单落在 App.tsx(计划未明确落点),Pet.tsx 只上报坐标,组件解耦;
+  4. **双通道记录不改**:`getCpuUsage` 与 `getSystemInfo` 读同一 Mutex 缓存不同字段,合并需动 Rust 侧,本次不改,留待 P1-5 抽 monitor.rs 时整理。
 
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。

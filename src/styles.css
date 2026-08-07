@@ -24,7 +24,7 @@ body,
 /* ══════════ 宠物主体(精灵图渲染器挂载区) ══════════ */
 
 .pet {
-  cursor: pointer;
+  cursor: grab;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -34,6 +34,7 @@ body,
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
+  touch-action: none; /* 拖拽由 pointer 事件接管,禁用触摸滚动/缩放手势 */
 }
 
 .pet:hover {
@@ -42,6 +43,22 @@ body,
 
 .pet:active {
   transform: translateX(-50%) scale(0.95);
+}
+
+/* P1-2 拖拽后的绝对定位模式:inline left/top 接管,取消居中 transform */
+.pet.positioned {
+  left: auto;
+  bottom: auto;
+  transform: none;
+}
+
+/* P1-2 拖拽中:取消 hover 高亮与 active 缩放,避免视觉跳动与位置测量抖动 */
+.pet.dragging,
+.pet.dragging:hover,
+.pet.dragging:active {
+  filter: none;
+  transform: none;
+  cursor: grabbing;
 }
 
 /* 精灵图 canvas 挂载容器:尺寸由渲染器按帧尺寸×缩放生成 */
@@ -162,6 +179,53 @@ body,
 
 .close-btn:hover {
   opacity: 1;
+}
+
+/* ══════════ 宠物右键菜单(P1-2) ══════════ */
+
+/* 全屏透明遮罩:点击任意处关闭菜单,同时拦截下方交互 */
+.context-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 91;
+  min-width: 140px;
+  padding: 6px;
+  background: rgba(30, 30, 30, 0.95);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.context-menu-item:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.context-menu-item.danger {
+  color: #f87171;
+}
+
+.context-menu-item.danger:hover {
+  background: rgba(239, 68, 68, 0.25);
 }
 
 /* ══════════ 设置按钮 ══════════ */

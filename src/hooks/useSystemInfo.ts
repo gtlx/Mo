@@ -4,7 +4,8 @@
 // ============================================================
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getSystemInfo, getCpuUsage, getMemoryInfo } from "../services/system";
-import type { SystemInfo } from "../types";
+import type { SystemInfo, PetStatus } from "../types";
+import { getStatus } from "../utils/status";
 
 /** usePolling 的返回结构:数据 / 错误 / 加载中 / 手动刷新 */
 interface PollingResult<T> {
@@ -22,11 +23,15 @@ interface PollingResult<T> {
  * @param fetcher    异步取数函数(services 层封装,如 getCpuUsage)
  * @param intervalMs 轮询间隔(毫秒)
  * @param initial    初始兜底值(首次加载完成前的默认数据)
+ * @param isEqual    可选:新旧值相等性判断。传入后「值相等不 setState」,
+ *                   调用方可在数值频繁变化但语义状态未变时避免无谓 re-render
+ *                   (P1-4 状态渲染解耦的关键机制)
  */
 function usePolling<T>(
   fetcher: () => Promise<T>,
   intervalMs: number,
   initial: T,
+  isEqual?: (a: T, b: T) => boolean,
 ): PollingResult<T> {
   const [data, setData] = useState<T>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -36,11 +41,18 @@ function usePolling<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
+  // isEqual 同样用 ref 持有,避免内联比较函数导致 refetch/effect 重建
+  const isEqualRef = useRef(isEqual);
+  isEqualRef.current = isEqual;
+
   /** 执行一次取数并更新状态(供定时器与手动 refetch 复用) */
   const refetch = useCallback(async () => {
     try {
       const value = await fetcherRef.current();
-      setData(value);
+      // 传入 isEqual 且新旧相等时保留旧引用,不触发 re-render
+      setData((prev) =>
+        isEqualRef.current && isEqualRef.current(prev, value) ? prev : value,
+      );
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -73,11 +85,27 @@ export function useSystemInfo(intervalMs: number = 2000) {
 }
 
 /**
- * CPU 使用率(默认 1s 轮询,驱动宠物状态机)
- * 对外 API 保持返回 number 不变
+ * CPU 使用率(默认 2s 轮询 —— P1-4 降频,原 1s)
+ * 驱动 CPU 气泡;对外 API 保持返回 number 不变
  */
-export function useCpuUsage(intervalMs: number = 1000): number {
+export function useCpuUsage(intervalMs: number = 2000): number {
   const { data } = usePolling(getCpuUsage, intervalMs, 0);
+  return data;
+}
+
+/**
+ * 宠物状态轮询(默认 2s 轮询)—— P1-4 状态渲染解耦核心:
+ * 轮询 CPU → getStatus 映射为离散 PetStatus,配合 usePolling 的 isEqual
+ * 做到「状态值相等不 setState」:CPU 数值在同一状态区间内波动时,
+ * 宠物主体(Pet.tsx)零 re-render,只有真正跨阈值切换状态才更新。
+ */
+export function usePetStatus(intervalMs: number = 2000): PetStatus {
+  const { data } = usePolling<PetStatus>(
+    async () => getStatus(await getCpuUsage()),
+    intervalMs,
+    "idle",
+    (a, b) => a === b,
+  );
   return data;
 }
 

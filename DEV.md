@@ -21,7 +21,8 @@ src/                          # 前端(React + TS)
 ├── App.tsx                   主应用:状态协调、宠物/面板/设置开关
 ├── main.tsx                  入口
 ├── components/               UI 组件
-│   ├── Pet.tsx               宠物(渲染器驱动:业务状态 → PetRenderer,不绘制五官)
+│   ├── Pet.tsx               宠物(渲染器驱动 + 手势表:拖拽/单击/双击/右键,见 2.4)
+│   ├── CpuBubble.tsx         CPU 数字气泡(独立 2s 轮询,与宠物主体渲染解耦,见 2.5)
 │   ├── SystemInfoPanel.tsx   系统信息面板(进度条)
 │   └── SettingsModal.tsx     设置弹窗(语言/置顶/最小化/退出)
 ├── renderers/                渲染器抽象层(P1-3 新增,为 Live2D/Spine 预留)
@@ -29,11 +30,12 @@ src/                          # 前端(React + TS)
 │   ├── sprite-renderer.ts    精灵图渲染器:canvas 帧动画 + 分层状态机 + 自然动效
 │   └── index.ts              createRenderer 工厂:按 manifest.type 分发
 ├── assets/pets/<pet-id>/     宠物素材库(每宠物一个目录:pet.json + spritesheet.png + index.ts)
-├── hooks/useSystemInfo.ts    数据轮询 hooks(useCpuUsage 等)
+├── hooks/useSystemInfo.ts    数据轮询 hooks(useCpuUsage / usePetStatus 等)
 ├── services/system.ts        Tauri 命令封装层(唯一调 invoke 的地方)
 ├── i18n/                     国际化(locales/zh.json · en.json)
 ├── types/index.ts            共享类型(PetStatus/SystemInfo 等)
-└── styles.css                样式(布局/气泡/面板;宠物五官动画已迁入渲染器)
+├── utils/status.ts           纯函数:getStatus(CPU 阈值 → PetStatus)
+└── styles.css                样式(布局/气泡/面板/右键菜单;宠物五官动画已迁入渲染器)
 
 src-tauri/src/                # 后端(Rust)
 ├── app.rs                    命令 + 后台监测 + 托盘 + 窗口控制 + 入口
@@ -48,7 +50,7 @@ React 组件 → services/system.ts → Tauri invoke → Rust 命令
 Rust:后台线程轮询 sysinfo → 写入 AppState(Mutex 缓存) → 命令读缓存返回
 ```
 
-关键机制:Rust 后台线程每 1s 轮询 CPU/内存写入 `AppState` 的 `Mutex`;前端每 1–2s 通过命令读缓存,前端零阻塞。
+关键机制:Rust 后台线程每 1s 轮询 CPU/内存写入 `AppState` 的 `Mutex`;前端 2s 轮询读缓存(气泡 2s / 宠物状态 2s,见 2.5),前端零阻塞。
 
 ### 2.3 渲染器抽象层(P1-3 落地,精灵图 + 自然动效)
 
@@ -115,6 +117,51 @@ interface PetRenderer {
 - 宠物 = 一个目录(spritesheet + pet.json 声明帧尺寸/状态行/循环时间/缩放),渲染器只认协议,**不硬编码任何宠物长相**;
 - 换宠物 = 换目录(参考 `src/assets/pets/qqpet-codex/`),不改代码。
 
+### 2.4 手势表(P1-2 落地)
+
+> 借鉴 Hermes「完整手势表」:拖拽 / 单击 / 双击 / 右键各司其职。判定逻辑集中在 `Pet.tsx`,右键菜单由 `App.tsx` 协调渲染,`styles.css` 提供样式;纯前端实现,**零 Rust 改动**,web 调试全可验证。
+
+| 手势 | 判定 | 行为 |
+|---|---|---|
+| 拖拽 | pointer 事件链(pointerdown/move/up/cancel),位移 > `DRAG_THRESHOLD`(5px)判定为拖拽 | 移动宠物;位置写入 localStorage(`mo.pet.position`),刷新后保留;拖出屏幕边界自动 clamp 回可视区 |
+| 单击 | 延迟 `CLICK_DELAY`(250ms)判定(等待双击窗口) | 切换信息面板 |
+| 双击 | dblclick,取消挂起的单击 | 触发挥手动画(greet);独立覆盖窗占位 no-op(P1-1 未落地,TODO 标注) |
+| 右键 | contextmenu,`preventDefault` 阻止浏览器默认菜单 | 上报 `clientX/clientY` 给 App 层,弹自定义菜单(设置 / 退出);屏幕边缘 clamp,全屏透明遮罩点击关闭 |
+
+#### 实现要点
+
+1. **拖拽判定**:`setPointerCapture` 保证鼠标移出元素后仍能收到 move/up;位移超过 5px 才判定为拖拽,未超阈值回落为单击(自然支持「点一下不动」)。仅左键拖拽(`e.button !== 0` 直接忽略)。
+2. **拖拽后 click 抑制**:浏览器在 pointerup 释放后仍会派发 click,用 ref(`isDraggingRef`)而非 state 标记拖拽中——state 更新有延迟,click 到达时可能已重置;ref 保证标记保持到 click 消费,避免拖拽结束误触发面板切换。
+3. **单击/双击分离**:单击延迟 250ms 判定(给双击留窗口);第二次点击取消挂起单击,交给随后的 dblclick 触发双击;双击也主动清掉挂起单击,防双触发。
+4. **位置持久化**:拖拽结束把最终位置写入 `localStorage`;组件初始化时读取并校验(x/y 为 number,损坏 JSON / 非法值回退默认底部居中布局);存储不可用(隐私模式)时静默降级为会话内有效。
+5. **首次拖拽固化**:默认布局是 CSS 底部居中 + `translateX(-50%)`,首次按下时用 `getBoundingClientRect()` 补偿水平位移,固化为可写的 absolute left/top(styles.css `.pet.positioned` 接管,取消居中 transform)。
+6. **右键菜单**:`Pet.tsx` 只上报坐标,不感知菜单内容(App 层 `onContextMenu(x, y)` 回调);App 层做屏幕边缘 clamp(菜单不超出视口)+ 全屏透明遮罩(`.context-menu-overlay`)点击/右键关闭并拦截下方交互。菜单项:设置(打开设置弹窗)、退出(no-op 占位,web 下无效)。
+
+### 2.5 状态渲染解耦(P1-4 落地)
+
+> 目标:CPU 数值每秒波动,但宠物主体(动画/呼吸/眨眼)不应随之频繁 re-render。手段:①轮询降频(气泡 1s → 2s);②`usePolling` 增加 `isEqual` 参数(值相等不 setState);③CPU 气泡独立成组件。
+
+#### 数据通道
+
+```
+usePetStatus(2s)  → 宠物主体(Pet.tsx)状态驱动:getStatus(cpu) 映射离散 PetStatus,isEqual 值相等不 setState
+useCpuUsage(2s)   → CpuBubble 独立组件:数字实时跳动只更新气泡自身
+useSystemInfo(2s) → 信息面板:CPU + 内存
+```
+
+#### 关键机制
+
+1. **`usePolling` 加 `isEqual` 参数**(P1-4 核心):`setData(prev => isEqual(prev, value) ? prev : value)`——新旧值相等时保留旧引用,React 跳过 re-render。`isEqual` 用 ref 持有,内联比较函数不会导致 effect 重建。
+2. **`usePetStatus`(新增,2s 轮询)**:`getStatus(await getCpuUsage())` 把连续 CPU 数值映射为离散状态(`overload/working/thinking/idle/sleeping`),`isEqual: (a, b) => a === b`——CPU 在同一状态区间内波动时,宠物主体**零 re-render**;只有跨阈值切换状态才更新,并经由渲染器 `play(status)` 平滑过渡。
+3. **`CpuBubble` 独立组件(新增,2s 轮询)**:数字气泡自持 `useCpuUsage(2000)`,数据变化只更新气泡 DOM,与宠物主体互不影响。
+4. **渲染循环本就不经过 React**:P1-3 渲染器用 requestAnimationFrame 驱动 canvas 原生绘制,天然不受 React 更新影响;解耦后 React 更新频率进一步降低到「仅状态切换」。
+
+#### 双通道评估结论(记录不改)
+
+- **现状**:monitor 线程同一份缓存写两处(`cpu_usage` + `system_info.cpu_usage`),前端 `getCpuUsage` / `getSystemInfo` / `getMemoryInfo` 分别轮询读取(对应三组 hook)。
+- **评估**:两个命令读的是同一 `Mutex` 缓存的不同字段,合并为单一 `get_system_info` 调用需动 Rust 侧(app.rs 命令定义)与全部调用方,收益有限、风险不小;
+- **结论(2026-08-08)**:**本次不改**,保留双通道;留待 P1-5 抽 `monitor.rs` 时与 app.rs 拆分(第 3 节弱点 #1)一并整理。
+
 ## 3. 模块化评估与改进计划
 
 **结论:整体结构清晰,属于 Tauri + React 标准分层,小规模下优秀。** 前端分层(组件/hooks/services/i18n/types)职责明确,services 层统一封装命令值得保留。
@@ -136,11 +183,11 @@ interface PetRenderer {
 | # | 借鉴点 | Hermes 做法 | Mo 落地 |
 |---|---|---|---|
 | 1 | **弹出覆盖窗口**(收益最大) | shift-click 把宠物弹到独立透明置顶窗,可拖拽、位置持久化、主窗最小化后仍可见 | Tauri 配置与命令能力已具备,加第二个透明置顶窗口即可 |
-| 2 | **完整手势表** | 拖拽移动 / 单击 / 双击 / shift-click 各司其职 | 目前单击与右键同一动作;至少补拖拽 + 位置 localStorage 持久化 |
+| 2 | **完整手势表** | 拖拽移动 / 单击 / 双击 / shift-click 各司其职 | ✅ **已落地(P1-2)**:拖拽 + localStorage 持久化 / 单击双击分离 / 右键自定义菜单,详见 2.4 |
 | 3 | **精灵图替换 CSS 五官** | 状态 → sprite 行 → 帧动画,换宠物只换图集 | ✅ **已落地(P1-3)**:渲染器抽象层 + qqpet-codex,详见 2.3 |
-| 4 | **状态与渲染解耦** | 漫游用命令式 el.style,settle 才 commit React | CPU 轮询降频;数字气泡独立组件,避免整只宠物每帧 re-render |
+| 4 | **状态与渲染解耦** | 漫游用命令式 el.style,settle 才 commit React | ✅ **已落地(P1-4)**:usePetStatus + isEqual 值相等不 setState;CpuBubble 独立 2s 轮询,详见 2.5 |
 | 5 | **阈值告警通知** | 任务完成 → 浮出 mail 图标,点击回到线程 | CPU/内存超阈值 → 警示动画 + 系统通知,让监控"有用" |
-| 6 | **点击抚摸反馈** | 词表匹配"good bot"飘爱心(零模型调用) | ✅ **部分落地(P1-3)**:点击触发 waving 行挥手动画(greet),飘爱心留待 P1-6 |
+| 6 | **点击抚摸反馈** | 词表匹配"good bot"飘爱心(零模型调用) | ✅ **部分落地(P1-3/P1-2)**:单击/双击触发 waving 挥手动画(greet),飘爱心留待 P1-6 |
 
 **明确不借鉴**:CLI/TUI 渲染、3200+ 宠物画廊生态、roam 漫游(surface 感知跳跃依赖 DOM 度量)、多 agent 网关。
 
