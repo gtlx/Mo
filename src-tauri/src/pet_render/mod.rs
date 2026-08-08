@@ -79,6 +79,18 @@ pub fn spawn_pet_window(app: &tauri::App) -> Result<(), Box<dyn Error>> {
     // draw 回调:渲染一帧 → RGBA(straight)→ ARGB32(预乘)→ blit
     let r_draw = Arc::clone(&renderer);
     area.connect_draw(move |_area, cr| {
+        // ── 阶段2(2026-08-08):清除 GTK 主题背景填充 ──
+        // GTK3 在 draw 回调前已按主题 CSS 渲染 widget 背景(实测默认主题
+        // (80,80,80) 灰;GTK_THEME=Adwaita:light 变 (78,201,176),实锤主题
+        // 背景填充,与 WebKitGTK alpha 无关)。cairo 默认 Over 混合会把企鹅
+        // blit 在主题背景之上 → 内容层不透明。修法:Operator::Source(直接
+        // 覆盖目标含 alpha,不做混合)+ 全透明 paint 抹掉主题背景,再恢复
+        // Over 正常混合贴企鹅像素(企鹅边缘有半透明像素,须保持混合)。
+        cr.set_operator(cairo::Operator::Source);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0); // 全透明,直接覆盖(含 alpha)
+        let _ = cr.paint(); // 清空整个 DrawingArea,主题背景不复存在
+        cr.set_operator(cairo::Operator::Over); // 恢复默认混合,继续正常 blit
+
         let mut r = r_draw.lock().unwrap();
         let frame = r.render();
         let (fw, fh) = (frame.width as i32, frame.height as i32);

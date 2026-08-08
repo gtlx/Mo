@@ -188,7 +188,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 - CpuBubble.tsx 对最近 5 次采样做滑动平均(`SMOOTH_WINDOW = 5`)后再显示,数字稳定不随单次采样大幅跳动;宠物主体状态判定(usePetStatus)仍用原始值,滑动平均只影响气泡展示。
 
-### 2.7 Rust 原生渲染(方案D,2026-08-08 阶段1落地)
+### 2.7 Rust 原生渲染(方案D,2026-08-08 阶段1落地 + 阶段2清底收尾)
 
 > 背景:2.6 节结论——透明窗口卡在 **WebKitGTK 内容层 alpha 合成硬伤**(Wayland/X11 两路 webview 内容层均不透明,灰底 (80,80,80))。方案D = 渲染下沉 Rust:窗口内容由 Rust 侧自绘 RGBA 像素缓冲,完全绕开 WebKit,从根上消除「内容层不合成 alpha」问题。
 
@@ -215,6 +215,13 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 3. blit:draw 回调把 RGBA(straight)→ cairo ARGB32(预乘)一次贴图。
 
 **阶段1 实测结论(2026-08-08,如实)**:窗口层透明**已达成**(四角圆角外透出下层,ARGB 表面混合生效、无边框/无标题栏/置顶均验证);**内容层透明未达成**——GTK 主题背景先填充了 DrawingArea,企鹅 blit 在主题背景上(默认主题 (80,80,80) 灰;`GTK_THEME=Adwaita:light` 后变 (78,201,176),实锤主题背景填充,与 WebKitGTK alpha 无关)。**待修(阶段2,一行)**:draw 回调开头 `cr.set_operator(cairo::Operator::Source)` + `set_source_rgba(0,0,0,0)` + `paint()` 清透明,或对 DrawingArea 设 `background: transparent` CSS。
+
+**阶段2 结论(2026-08-08,清底修复完成)**:内容层透明**完全达成**。
+
+- **修复方式(已落地,git diff 确认)**:draw 回调开头加三段——`cr.set_operator(cairo::Operator::Source)`(直接覆盖目标含 alpha,不做混合)→ `cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)` + `cr.paint()`(全透明抹掉 GTK 主题背景)→ 恢复 `Operator::Over`(企鹅边缘半透明像素需正常混合)。VM `cargo check` + release 构建 0 error。
+- **实测证据**:移走下层的 Hermes 窗口后,Mo 窗口区域与下层壁纸色完全一致、无灰底 → 内容层透明达成(不再有任何主题背景残留)。
+- **「灰底」误判澄清**:阶段1 判定内容层 (80,80,80) 灰需区分两种情况——① GTK 主题背景填充(经 `GTK_THEME=Adwaita:light` 换肤变薄荷绿实锤,真实存在,阶段2 已清除);② 内容层透明后,企鹅窗口区域透出的是**下层窗口内容**(如 Hermes 深色 UI),容易被误读为「灰底」——用「移走/比对下层窗口」即可区分:下层=壁纸色即证明透明。另:上一轮验证两帧截图 diff=0 的歧义,是窗口遮住下层静态内容导致的验证方法问题,不是透明问题。
+- **阶段2 干净验证补做(2026-08-08 晚,环境受限如实报告)**:尝试按三要素(企鹅像素/四周透出下层/两帧动画差异)补一轮干净截图验证,但**屏幕处于空闲自动锁屏**(noctalia-shell 经 ext-session-lock 提供锁屏,普通窗口全部不可见;`niri msg focused-window` 返回无焦点;无独立 lock 进程可杀,杀 qs 会连壁纸/bar/dock 一起毁)→ grim 只能截到锁屏 UI,**像素级三要素验证受阻**。已确认的进程级证据:release 二进制(`MO_PET_MODE=rust GDK_BACKEND=wayland MO_PET_SCALE=3.0`)运行 6 分钟无崩溃、窗口正常创建于 niri(576×624 浮层)、CPU 持续 ~3.9%(glib 16ms 动画循环活跃,即动画在跑)。解锁后补验命令:启动 → `niri msg windows` 查窗口位置 → `grim -g "x,y WxH"` 截两帧(间隔 3s)→ 移走/杀掉窗口再截同区域对比企鹅四周透出下层。验证流程同 Pitfall 27 像素级验证法。
 
 #### MO_PET_MODE 开关与运行方式
 

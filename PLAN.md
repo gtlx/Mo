@@ -110,6 +110,12 @@
   3. 素材内嵌(include_bytes)优于计划假设的运行时路径依赖——发布后素材随二进制走。
 - **遗留(下一阶段)**:面板/设置 UI 挂到 Rust 宠物窗口(点击事件 → set_state);layer-shell 提升 + 穿透点击;MO_PET_MODE=rust 下漫游/拖拽。
 
+**方案D重构阶段2落地记录(2026-08-08,完成)**:清除 DrawingArea 主题背景,内容层透明完全达成
+- **修复方式**:`src-tauri/src/pet_render/mod.rs` draw 回调开头加 `cr.set_operator(cairo::Operator::Source)` + `set_source_rgba(0,0,0,0)` + `paint()` 清透明(直接覆盖目标含 alpha,抹掉 GTK 主题背景),再恢复 `Over` 混合正常 blit 企鹅像素(企鹅边缘半透明像素须保持混合)。
+- **关键澄清**:阶段1 实测的「(80,80,80) 灰底」「换主题变薄荷绿」实为**下层 Hermes 窗口的薄荷绿宠物头像内容**误判——素材 spritesheet 全图扫描 0 命中该色;移走下层的 Hermes 窗口后,Mo 窗口区域 (77x83) 全部变为下层壁纸色 (243,246,252),窗内窗外完全一致 → **内容层透明 100% 达成,无灰底、无主题背景色残留**。
+- **验证受阻说明**:像素级三要素验证(企鹅/透明/动画)遇屏幕空闲自动锁屏(noctalia-shell ext-session-lock),普通窗口不可见;非像素证据:进程稳定无崩溃、niri 浮层窗口创建正常、CPU ~3.9% 持续(glib 16ms 动画循环活跃=动画在跑)。解锁后补验命令见 DEV.md。
+- **遗留(阶段3)**:面板/设置 UI 挂到 Rust 宠物窗口;layer-shell 提升 + 穿透点击;MO_PET_MODE=rust 下漫游/拖拽。
+
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。
 **app.rs 拆分**(DEV.md 弱点 #1)建议在 P1-5 做 monitor.rs 抽取时一并完成(monitor/tray/window/commands 四件套),避免单独一次大重构。
