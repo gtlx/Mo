@@ -7,7 +7,8 @@
 // 对齐(同一套「自然动效」四要素):
 //   1. 分层状态机:业务状态 → 精灵图状态行 → 帧循环
 //   2. 微动效叠加:呼吸(scaleY 正弦)+ 眨眼(周期压扁)
-//   3. 平滑过渡:状态切换淡入 180ms,行不变只换节奏不重启
+//   3. 平滑过渡:状态行切换用交叉淡入 220ms(旧帧定格淡出 + 新帧淡入,
+//      画面不闪没),行不变只换节奏不重启
 //   4. 帧节奏自然化:easeInOutSine 映射帧位置(起步/收步稍停)
 //
 // 时间模型:纯内部时钟(tick 喂 dt),不依赖外部时间源——
@@ -21,8 +22,12 @@ use std::collections::HashMap;
 
 // ---------- 常量与配置(与前端 sprite-renderer.ts 对齐) ----------
 
-/// 状态切换淡入时长(ms)
-const FADE_IN_MS: f64 = 180.0;
+/// 状态切换交叉淡入时长(ms)。
+/// 2026-08-09 修复「从上往下卡一下」:原 180ms「从 0 渐显」会让切换瞬间
+/// 旧画面整个闪没再渐显(卡顿感),叠加行切换帧内容跳变/眨眼中止垂直
+/// 弹跳,视觉上像「从上往下刷新」。改为交叉淡入(旧帧淡出+新帧淡入)
+/// 并略增至 220ms,画面不闪没,所有瞬变被平滑过渡吸收。
+const FADE_IN_MS: f64 = 220.0;
 /// 眨眼参数:周期随机区间 / 闭合时长
 const BLINK_MIN_MS: f64 = 2600.0;
 const BLINK_MAX_MS: f64 = 5200.0;
@@ -82,6 +87,19 @@ fn ease_in_out_sine(t: f64) -> f64 {
 /// 线性插值
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
+}
+
+/// 交叉淡入混合:new = old*(1-e) + new*e(RGBA 四通道逐像素 lerp)。
+/// 两帧尺寸相同(同一渲染器输出);透明像素互相 lerp 保持透明,
+/// 半透明边缘也平滑过渡,不会产生硬边。仅淡入期(220ms)调用,
+/// 性能开销可忽略。
+fn blend_crossfade(new: &mut [u8], old: &[u8], e: f64) {
+    let inv = 1.0 - e;
+    for (n, o) in new.chunks_exact_mut(4).zip(old.chunks_exact(4)) {
+        for c in 0..4 {
+            n[c] = (n[c] as f64 * e + o[c] as f64 * inv) as u8;
+        }
+    }
 }
 
 /// 极简 xorshift64 随机数(零依赖,用于眨眼/初相随机化)
@@ -144,6 +162,17 @@ pub struct SpriteRenderer {
     /// 内部时钟(ms,由 tick 累计)
     now_ms: f64,
     rng: Rng,
+
+    // 交叉淡入(2026-08-09:替代「从 0 淡入」,修复状态切换闪没/跳变)
+    /// 旧帧缓存:切换前最后一帧的快照(含当时的眨眼压扁/呼吸相位),
+    /// 行切换后 FADE_IN_MS 内与它逐像素混合淡出
+    prev_frame: Option<RenderFrame>,
+    /// 缓存帧对应的状态行号(行变化 → 触发交叉淡入)
+    prev_row: u32,
+    /// 是否处于交叉淡入期(期内冻结缓存,保持「切换前最后一帧」)
+    fading: bool,
+    /// 交叉淡入开始时刻(内部时钟 ms)
+    fade_start: f64,
 }
 
 impl SpriteRenderer {
@@ -177,6 +206,10 @@ impl SpriteRenderer {
             blink_start: -1.0,
             now_ms: 0.0,
             rng,
+            prev_frame: None,
+            prev_row: 0,
+            fading: false,
+            fade_start: 0.0,
         };
 
         // 自动检测每行有效帧数(与前端 detectValidFrames 一致:
@@ -293,7 +326,10 @@ impl PetRenderer for SpriteRenderer {
             self.state_start = self.now_ms;
         }
         // 状态切换不重置眨眼计时(否则频繁切换会无限推迟眨眼);
-        // 但目标状态禁眨眼时,立即中止进行中的眨眼
+        // 但目标状态禁眨眼时,立即中止进行中的眨眼。注意:若中止时正
+        // 在眨眼压扁(scaleY≈0.08),这里硬中止本会垂直瞬跳——但交叉
+        // 淡入(第 0/5 节)用「切换前最后一帧(含压扁)」定格淡出,瞬跳
+        // 被逐像素混合平滑吸收,无需额外做眨眼恢复动画。
         if !tuning_for(state).blink {
             self.blink_start = -1.0;
         }
@@ -310,6 +346,25 @@ impl PetRenderer for SpriteRenderer {
         let fw = self.manifest.frame_width();
         let fh = self.manifest.frame_height();
         let scale = (w as f64) / fw as f64; // 实际生效缩放
+
+        // ---- 0. 行切换检测:触发交叉淡入 ----
+        // 「从上往下卡一下」根因修复(2026-08-09):旧逻辑切换淡入从 alpha=0
+        // 开始,切换瞬间旧画面整个闪没再渐显(卡顿感);叠加行切换帧内容
+        // 跳变、眨眼压扁中途被中止(scaleY 瞬间回弹)的垂直突变,视觉上像
+        // 「从上往下刷新」。交叉淡入 = 切换后 FADE_IN_MS 内,旧帧(切换前
+        // 最后一帧,含眨眼/呼吸瞬时状态)定格淡出 + 新帧淡入,画面不闪没,
+        // 一切瞬变被逐像素混合平滑吸收。
+        if self.prev_frame.is_some() && self.prev_row != self.row_index {
+            if self.fading {
+                // 淡入中又切行(演示节奏下动作最短 2s > 淡入 220ms,不会发生;
+                // 防御性兜底):放弃旧帧,直接显示新帧
+                self.fading = false;
+                self.prev_frame = None;
+            } else {
+                self.fading = true;
+                self.fade_start = self.now_ms; // 从本次渲染起进入交叉淡入
+            }
+        }
 
         // ---- 1. 计算当前帧(缓动映射,起步/收步稍停) ----
         let tuning = tuning_for(&self.status);
@@ -349,15 +404,9 @@ impl PetRenderer for SpriteRenderer {
             self.blink_start = self.now_ms;
         }
 
-        // ---- 3. 状态切换淡入(从 0 渐显,不硬切) ----
-        let since_switch = self.now_ms - self.state_start;
-        let alpha = if since_switch < FADE_IN_MS {
-            since_switch / FADE_IN_MS
-        } else {
-            1.0
-        };
-
         // ---- 4. 逐像素绘制(反向映射 + 双线性采样) ----
+        // 注:状态切换的平滑由末尾「交叉淡入」负责(旧帧淡出+新帧淡入),
+        // 不再做「从 0 渐显」——那会让切换瞬间画面闪没(见第 0 节注释)。
         // 目标像素 → 源帧坐标:先按缩放还原到帧内坐标,再按
         // 底部锚做 scaleY(呼吸/眨眼)反向压缩;双线性采样平滑。
         let src_x0 = frame_idx * fw;
@@ -375,7 +424,7 @@ impl PetRenderer for SpriteRenderer {
                 let sy = y_src + src_y0 as f64;
                 if let Some((r, g, b, a)) = self.sample(sx, sy) {
                     let i = ((y * w + x) * 4) as usize;
-                    let out_a = (a as f64 * alpha) as u8;
+                    let out_a = a; // 全帧直出,过渡交给末尾交叉淡入
                     if out_a > 0 {
                         pixels[i] = r;
                         pixels[i + 1] = g;
@@ -384,6 +433,27 @@ impl PetRenderer for SpriteRenderer {
                     }
                 }
             }
+        }
+
+        // ---- 5. 交叉淡入混合(替代旧「从 0 渐显」)----
+        // 淡入期内逐像素 lerp:新帧 * e + 旧帧快照 * (1-e),e 用缓动曲线
+        // (起止柔和)。旧帧是切换前最后一帧的静态快照,定格淡出。
+        if self.fading {
+            let t = (self.now_ms - self.fade_start) / FADE_IN_MS;
+            if t >= 1.0 {
+                self.fading = false; // 淡入完成
+            } else if let Some(old) = &self.prev_frame {
+                let e = ease_in_out_sine(t);
+                blend_crossfade(&mut frame.pixels, &old.pixels, e);
+            }
+        }
+
+        // ---- 6. 缓存本帧(仅非淡入期)----
+        // 供下次行切换做「旧帧快照」;淡入期内冻结缓存,保证混合用的
+        // 一直是切换前最后一帧,而不是过渡中间帧。
+        if !self.fading {
+            self.prev_row = self.row_index;
+            self.prev_frame = Some(frame.clone());
         }
 
         frame

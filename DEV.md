@@ -204,7 +204,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 |---|---|
 | `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ 演示状态序列 |
 | `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
-| `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/淡入 180ms/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
+| `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/**交叉淡入 220ms**(2026-08-09 修复「从上往下卡一下」:旧「从 0 渐显」切换瞬间画面闪没,改旧帧定格淡出+新帧淡入)/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
 | `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
 | `factory.rs` | 渲染器工厂:按 `type` 分发(sprite 实现;live2d/spine 报错暴露)。素材来源:env `MO_PET_DIR` 优先(可更换),默认编译期内嵌 `src/assets/pets/qqpet-codex/`(include_str!/include_bytes!) |
 
@@ -244,7 +244,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
   - niri/Wayland 下必须带 `GDK_BACKEND=wayland`(layer-shell 协议仅 Wayland 可用;X11 下 GTK3 RGBA visual 会强制 CSD 白标题栏);
   - 素材覆盖:`MO_PET_DIR=<目录>` 从磁盘读 pet.json + spritesheet.png;`MO_PET_SCALE=<f64>` 覆盖显示缩放(渲染器尺寸 = 帧尺寸 × scale,qqpet-codex 默认 192×208 × 0.4 ≈ 77×83);
   - 验证放大:`MO_PET_SCALE=2.0` → 384×416 窗口,左上锚定,便于定位/截图。
-- 演示状态序列 `DEMO_STATES = ["idle", "waving", "thinking", "working", "jumping"]` 周期切换,证明状态机 + 动画循环工作;后续由面板事件驱动。
+- 演示状态机(2026-08-09 节奏自然化,修复「切换太快」):`DEMO_STATES` 权重池 `[("thinking",3), ("working",2), ("waving",1), ("jumping",1)]`——**idle 为主**(每次发呆 8~15s 随机,30% 概率再延长 4~8s),动作偶发(2~4s,waving 固定 1.8s),动作到期必回 idle(旧逻辑缺此分支会永久卡在动作状态);权重 = 切换「理由」,thinking 最常、跳跃/挥手偶发。状态切换平滑由 sprite.rs 交叉淡入(220ms)保证。后续由面板事件驱动真实状态。
 
 #### 与 WebKit 路径并存说明
 

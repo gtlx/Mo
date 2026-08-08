@@ -14,6 +14,8 @@
 
 /// 单帧渲染输出:RGBA8 像素缓冲(straight alpha,非预乘)。
 /// 由窗口层负责转换成 GTK/cairo 需要的 ARGB32 预乘格式。
+/// Clone:交叉淡入需要缓存「切换前最后一帧」的快照。
+#[derive(Clone)]
 pub struct RenderFrame {
     /// 帧宽度(px)
     pub width: u32,

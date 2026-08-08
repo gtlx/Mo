@@ -34,10 +34,61 @@ use std::time::Duration;
 /// 动画帧间隔(ms)≈ 60fps。Rust 侧时钟驱动,不依赖前端。
 const FRAME_MS: u32 = 16;
 
-/// 演示状态序列(证明 set_state + 动画循环工作;后续由面板事件驱动)
-/// - "waving" 是精灵图行名直切(对应前端 greet 挥手,短暂后回 idle)
-/// - 其余为业务状态(经 STATUS_TO_ROW 映射到对应行)
-const DEMO_STATES: [&str; 5] = ["idle", "waving", "thinking", "working", "jumping"];
+/// 演示状态池(证明 set_state + 动画循环工作;后续由面板事件驱动)。
+/// 每项 = (状态名, 权重)。自然节奏设计(2026-08-09 修复「切换太快」):
+/// - **idle 为主**:每次发呆 8~15s 随机,30% 概率再延长 4~8s(像真宠物
+///   偶尔长时间不动);动作只是偶发点缀。
+/// - **动作短暂**:2~4s 随机,waving 固定 1.8s(挥手一下)。
+/// - **权重 = 切换的「理由」**:thinking 最高(发呆→思考最像真宠物)、
+///   working 次之(认真工作)、waving/jumping 最低(互动与兴奋,偶发)。
+/// - 旧逻辑缺陷(已修):非 idle 到期后无回退分支(只有 waving 单独处理),
+///   切到 thinking/working/jumping 会永久卡住;且 idle 仅 3~5s 就切,
+///   节奏机械偏快 → 观感「状态切换太快」。
+const DEMO_STATES: [(&str, u32); 4] = [
+    ("thinking", 3), // 思考:权重最高
+    ("working", 2),  // 工作:次之
+    ("waving", 1),   // 挥手:互动表现,偶发
+    ("jumping", 1),  // 跳跃:兴奋表现,偶发
+];
+
+/// 简单 LCG 随机数(零依赖,状态机节奏随机化用)。
+fn demo_next_u64(seed: &mut u64) -> u64 {
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *seed >> 33
+}
+
+/// 生成一次 idle 停留时长(ms):基础 8~15s 随机,30% 概率再「发呆」
+/// 4~8s(避免机械固定节奏,像真宠物偶尔长时间不动)。
+fn idle_duration_ms(seed: &mut u64) -> f64 {
+    let base = 8000.0 + (demo_next_u64(seed) % 7000) as f64; // 8.0 ~ 14.999 s
+    if demo_next_u64(seed) % 100 < 30 {
+        base + 4000.0 + (demo_next_u64(seed) % 4000) as f64 // +4 ~ 8 s
+    } else {
+        base
+    }
+}
+
+/// 按权重挑一个动作状态,返回 (状态名, 播放时长 ms)。
+/// 动作 2~4s 随机;waving 固定 1.8s(挥手一下)。
+fn pick_action(seed: &mut u64) -> (&'static str, f64) {
+    let total: u32 = DEMO_STATES.iter().map(|(_, w)| w).sum();
+    let mut roll = (demo_next_u64(seed) % total as u64) as u32;
+    // DEMO_STATES 是 Copy 数组,按值迭代出 (&str, u32),无需解引用
+    for (name, w) in DEMO_STATES {
+        if roll < w {
+            let dur = if name == "waving" {
+                1800.0 // 挥手一下(短暂)
+            } else {
+                2000.0 + (demo_next_u64(seed) % 2000) as f64 // 2 ~ 4 s
+            };
+            return (name, dur);
+        }
+        roll -= w;
+    }
+    ("thinking", 3000.0) // 兜底(权重求和必命中,不会走到)
+}
 
 /// 创建并显示 Rust 原生宠物窗口。
 /// 必须在 GTK 主线程调用(tauri setup 满足);窗口完全脱离 WebKit。
@@ -214,46 +265,48 @@ pub fn spawn_pet_window(app: &tauri::App) -> Result<(), Box<dyn Error>> {
         ControlFlow::Continue
     });
 
-    // ── 5. 演示状态机(1s 粒度):周期性随机切换业务状态 ──
+    // ── 5. 演示状态机(1s 粒度):自然节奏随机切换业务状态 ──
     // 证明 set_state + 动画循环工作;后续阶段由面板窗口发 tauri
     // 事件驱动真实状态(CPU 负载 → working/overload 等)。
+    // 节奏(2026-08-09 修复「切换太快」):idle 为主(8~15s 随机,30% 概率
+    // 再发呆),动作偶发(2~4s,waving 1.8s);动作到期必回 idle(旧逻辑缺
+    // 此分支会永久卡在动作状态)。idle→动作按权重挑(thinking 最常)。
     let r_demo = Arc::clone(&renderer);
     let mut demo_now: f64 = 0.0;
-    let mut next_change: f64 = 4000.0; // 启动 4s 后第一次切换(先定格 idle 便于观察)
+    let mut idle_until: f64 = 4000.0; // 启动先定格 idle 4s 便于观察(后续 8~15s 随机)
+    let mut action_until: f64 = -1.0; // 动作状态到期时间(-1 = 当前不在动作)
     let mut current: &str = "idle";
-    let mut waving_until: f64 = -1.0; // waving 状态结束时间(内部时钟)
     let mut seed: u64 = 0x1234_5678_9ABC_DEF0;
     glib::timeout_add_local(Duration::from_millis(1000), move || {
         demo_now += 1000.0;
 
-        // waving 到期自动回 idle(对应前端 greet 自动恢复)
-        if current == "waving" && demo_now >= waving_until {
+        // ① 动作状态到期 → 必回 idle(旧逻辑只有 waving 单独回收,
+        //    切到 thinking/working/jumping 会永久卡住,已统一处理)
+        if current != "idle" && demo_now >= action_until {
+            let prev = current;
             current = "idle";
             let mut r = r_demo.lock().unwrap();
             r.set_state("idle");
-            log::info!("[pet_render] waving 结束 → idle");
+            idle_until = demo_now + idle_duration_ms(&mut seed);
+            log::info!(
+                "[pet_render] {} 结束 → idle(下次发呆 {:.1}s)",
+                prev,
+                (idle_until - demo_now) / 1000.0
+            );
         }
 
-        if demo_now >= next_change && current == "idle" {
-            // 简单 LCG 取随机状态(排除 idle,避免原地切换)
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let idx = 1 + ((seed >> 33) as usize) % (DEMO_STATES.len() - 1);
-            let next = DEMO_STATES[idx];
+        // ② idle 到期 → 按权重挑动作(思考最常,跳跃/挥手偶发)
+        if current == "idle" && demo_now >= idle_until {
+            let (next, dur) = pick_action(&mut seed);
             current = next;
+            action_until = demo_now + dur;
             let mut r = r_demo.lock().unwrap();
             r.set_state(next);
-            log::info!("[pet_render] 演示状态切换 → {}", next);
-
-            // 播放时长:waving 短(挥手一下),其余 3~5s
-            let dur = if next == "waving" {
-                waving_until = demo_now + 1800.0;
-                1800.0
-            } else {
-                3000.0 + ((seed >> 17) % 2000) as f64
-            };
-            next_change = demo_now + dur;
+            log::info!(
+                "[pet_render] 演示状态切换 → {}(播放 {:.1}s)",
+                next,
+                dur / 1000.0
+            );
         }
 
         ControlFlow::Continue
