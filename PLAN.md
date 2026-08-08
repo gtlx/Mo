@@ -54,7 +54,7 @@
 
 | # | 借鉴点 | 落地内容 | 涉及文件 | 依赖 | 工作量 | 验证 |
 |---|---|---|---|---|---|---|
-| P1-1 | **弹出覆盖窗**(收益最大) | 新增第二个透明置顶无边框窗口(如 160×160),宠物可从主窗「弹出」到独立窗,可拖拽、位置持久化;主窗最小化后覆盖窗仍在 | `src-tauri/tauri.conf.json`(加窗口)、`src-tauri/src/app.rs` 或拆分后 `window.rs`(新命令 `spawn_popup`/`move_popup`)、`src/components/PopupPet.tsx`(复用 Pet 渲染) | 无 | M | 桌面调试(多窗口/置顶/位置持久化);web 调试只能验证 PopupPet 组件本身 |
+| P1-1 | **弹出覆盖窗**(收益最大) | ✅ **已完成(2026-08-09)**,见下方「P1-1 落地记录」。**与计划的差异**:方案 D 重构后宠物窗口是 Rust/GTK 自绘,本项走 **Rust 路径**(pet_render/mod.rs 第二 GTK 窗口),非计划里的 tauri.conf 加窗口 + `PopupPet.tsx` WebKit 前端路径 | `src-tauri/src/pet_render/mod.rs`(PetShared / spawn_popup_window / toggle_popup / 位置持久化) | 无 | M | ✅ VM `cargo check` 0 error + release 构建;本机运行:双击主窗 → "Mo Pet (Rust) Popup" 浮层出现(niri msg windows)、拖拽移动、重启后位置恢复;截图 /tmp/mo-p11-*.png |
 | P1-2 | **手势表** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、`src/App.tsx`、`src/styles.css` | 无 | S–M | ✅ `pnpm build` 0 error;web 调试:拖拽、双击挥手、右键菜单、位置刷新后保留 |
 | P1-3 | **精灵图替换 CSS 五官** | ✅ **已完成(2026-08-08)**,见下方「P1-3 落地记录」 | `src/renderers/`(新建)、`src/assets/pets/qqpet-codex/`(新建)、`src/components/Pet.tsx`、`src/styles.css`、`src/vite-env.d.ts` | 素材已就位:qqpet-codex(来自 `~/.hermes/pets/qqpet-codex/`) | M | ✅ `pnpm build` 0 error;web 调试帧动画/眨眼/呼吸/greet 挥手;`cargo check` 通过(虚拟机) |
 | P1-4 | **状态渲染解耦** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | ✅ `pnpm build` 0 error;web 调试:气泡 2s 实时刷新,宠物仅状态切换才更新 |
@@ -135,6 +135,18 @@
   - **共享状态**:`interact_until_ms`/`hearts_until_ms` 两个 `Arc<AtomicU64>` 截止时间戳(0=无),按钮回调写、状态驱动/draw 回调读,全在主线程原子操作。
 - **与计划的差异**:实现走 Rust 渲染路径(方案 D 落地后的正确归属),非计划里写的 `src/components/Pet.tsx` 前端路径;WebKit 前端路径保留原有 greet 挥手不受影响,后续 P2 对话情感反馈再在两条路径统一。
 - **验证**:VM `cargo check` 0 error;`pnpm tauri build --no-bundle` 出 release 二进制;本机运行点击宠物 → stderr「单击 → 抚摸反馈(爱心 + 撒娇 1500ms)」+「抚摸互动 → waving」,截图窗口区域出现粉红心形像素(1~1.5s 渐隐),双击 →「双击 → greet 挥手」;截图 `/tmp/mo-p16-*.png`。
+
+**P1-1 落地记录(2026-08-09,已完成并验证)**:弹出覆盖窗——双击主窗弹出/收起独立可拖拽窗口,位置持久化
+
+- **实现**(Rust 路径,`src-tauri/src/pet_render/mod.rs` 一处文件,渲染器核心 sprite.rs 零改动):
+  - **窗口形态**:弹出窗 = 普通 GTK toplevel(透明三件套 + `Operator::Source` 清底),**不提升 layer-shell**——layer 表面无 xdg move 请求,`begin_move_drag` 拖拽无法工作;普通 toplevel 才能在 `niri msg windows` 查坐标(位置持久化前提)。主窗保持 layer-shell Overlay 不变。
+  - **共享渲染器(同宠物同步)**:`PetShared`(renderer + overload_flag + interact/hearts 截止时间戳)主窗/弹出窗共用;draw 逻辑抽成 `draw_pet_frame(cr, &PetShared, area)`,两窗显示同一帧,爱心/红边同步;动画循环只 tick 一次渲染器,对 `areas` 集合统一 queue_draw;`DIAG_N` 提为模块级 static。
+  - **弹出机制**:双击主窗(`click_count >= 2`)→ greet 挥手 + `toggle_popup()`(首次双击懒创建,之后 show/hide);窗口句柄存 `PopupState` 长期持有(防 drop 销毁)。
+  - **拖拽**:弹出窗按下左键 → `begin_move_drag(1, root_x, root_y, timestamp)`(合成器接管,Wayland 正统;弹出窗无单击/双击交互,按下即拖)。
+  - **位置持久化**:`~/.local/share/mo/popup-pos.json`(XDG_DATA_HOME 优先,serde_json 逻辑坐标)——拖拽结束延迟 500ms 查 `niri msg windows` 实际坐标写入;弹出时存在则经 **niri IPC `move-floating-window --id N -x Δ -y Δ` 增量恢复**(应用内 position() 恒 (0,0) 不可用),无文件落主窗右侧默认位置。
+  - **位置查询**:`query_niri_window(title)` 解析 `niri msg windows` 文本输出(Window ID / Title / Workspace-view position)。
+- **与计划的差异**:① 实现走 Rust 渲染路径(方案 D 落地后的正确归属),非计划里的 `tauri.conf.json` 加窗口 + `PopupPet.tsx` 前端组件;② 触发交互为「双击主窗 toggle」(简化方案),非 Hermes 的 shift-click;③ 弹出窗无 WebKit 内容(纯 GTK 自绘,共享渲染器),不新增窗口配置。
+- **验证**:VM `cargo check` 0 error;`pnpm tauri build --no-bundle` 出 release 二进制;本机运行双击主窗 → stderr「双击 → greet 挥手 + 弹出窗 toggle」,`niri msg windows` 出现 "Mo Pet (Rust) Popup" 浮层(Is floating: yes),两窗并存截图;拖拽后 niri 位置变化 + json 落盘;重启后双击弹出恢复保存位置;截图 `/tmp/mo-p11-*.png`。
 
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。

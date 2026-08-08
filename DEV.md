@@ -202,7 +202,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 | 文件 | 职责 |
 |---|---|
-| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ **状态驱动**(P1-5:消费 monitor.rs 事件驱动真实状态,`MO_DEMO=1` 回退演示状态机;overload 红边警示)+ **抚摸反馈**(P1-6:点击事件 → 爱心 cairo 叠加 + waving 撒娇状态切换) |
+| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ **状态驱动**(P1-5:消费 monitor.rs 事件驱动真实状态,`MO_DEMO=1` 回退演示状态机;overload 红边警示)+ **抚摸反馈**(P1-6:点击事件 → 爱心 cairo 叠加 + waving 撒娇状态切换)+ **弹出覆盖窗**(P1-1:`spawn_popup_window` 普通 toplevel 可拖拽 + 位置持久化,与主窗共享渲染器) |
 | `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
 | `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/**交叉淡入 220ms**(2026-08-09 修复「从上往下卡一下」:旧「从 0 渐显」切换瞬间画面闪没,改旧帧定格淡出+新帧淡入)/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
 | `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
@@ -257,6 +257,20 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 - **共享状态**:`interact_until_ms`/`hearts_until_ms` 两个 `Arc<AtomicU64>`(截止时间戳,0=无),按钮回调(写)与状态驱动/draw 回调(读)全在 GTK 主线程,原子读写即够,不引入锁。
 - **验证**:VM `cargo check` 0 error + `pnpm tauri build --no-bundle` release;本机运行点击宠物 → stderr 打印「单击 → 抚摸反馈」/「抚摸互动 → waving」,截图窗口区域出现粉红心形像素(1~1.5s 渐隐),双击打印「双击 → greet 挥手」。
 
+#### 弹出覆盖窗(P1-1 落地,2026-08-09)
+
+> 借鉴 Hermes「shift-click 把宠物弹到独立透明置顶窗」,**Rust 路径**实现(方案 D 落地后的正确归属,非原 PLAN 的 tauri.conf + PopupPet.tsx WebKit 路径)。交互:双击主窗宠物 → greet 挥手 + **弹出/收起覆盖窗**(toggle);弹出窗可拖拽、位置持久化,显示状态与主窗互相独立。
+
+- **窗口形态差异(刻意)**:主窗 = layer-shell Overlay 表面(透明根治,但无 xdg move 请求,不能交互拖拽、不在 `niri msg windows` 列表);**弹出窗 = 普通 toplevel**(`keep_above` + `skip_taskbar` 天然浮层)→ ① `begin_move_drag` 拖拽(合成器接管,Wayland 正统);② `niri msg windows` 可查实际坐标(位置持久化的前提)。透明 = RGBA visual + draw 回调 `Operator::Source` 清底(阶段2 方案),与主窗内容层同一套绘制逻辑。
+- **共享渲染器(同一宠物、动画同步)**:`PetShared` 打包 渲染器 + overload 红边标志 + 抚摸截止时间戳;主窗/弹出窗 draw 回调都读它 → 两窗显示同一帧,爱心/红边同步。动画循环(16ms timeout)只 tick 一次渲染器,对 `areas` 集合(主窗 + 弹出窗 DrawingArea)统一 `queue_draw`。
+- **绘制逻辑抽取**:`draw_pet_frame(cr, &PetShared, area)` = 清透明底 → render → ARGB 预乘 blit → 红边 → 爱心;主窗/弹出窗共用(原主窗 draw 闭包整体迁入,行为不变;诊断计数 `DIAG_N` 提为模块级 static 供两窗共用)。
+- **弹出机制**:双击主窗(`click_count >= 2`)→ greet 挥手 + `toggle_popup()`——首次双击懒创建并显示,之后 show/hide 切换;窗口句柄存 `PopupState` 长期持有(gtk::Window drop 引用归零会销毁窗口)。
+- **拖拽**:弹出窗按下左键 → `begin_move_drag(1, root_x, root_y, timestamp)`(弹出窗无单击/双击交互,按下即拖)。
+- **位置持久化**:`~/.local/share/mo/popup-pos.json`(XDG_DATA_HOME 优先,serde_json `{x, y}` 逻辑坐标)——拖拽结束(button-release)延迟 500ms 查 `niri msg windows` 实际坐标写入;弹出时若文件存在则经 **niri IPC `move-floating-window --id N -x Δ -y Δ` 增量恢复**(Wayland 下程序化移动唯一途径,Pitfall 32),无文件落主窗右侧默认位置(左上 24px + 窗宽 + 12px)。
+- **niri 位置查询**:`query_niri_window(title)` 解析 `niri msg windows` 文本输出(Window ID / Title / Workspace-view position)——仅浮动窗口有 position 字段;layer 表面(主窗)不在列表。
+- **主窗最小化后弹出窗仍在**:主窗是 layer 表面无最小化概念;弹出窗是独立 toplevel,显示状态与主窗解耦,天然满足该需求。
+- **验证**:VM `cargo check` 0 error + `pnpm tauri build --no-bundle` release;本机运行双击 → stderr「双击 → greet 挥手 + 弹出窗 toggle」,`niri msg windows` 出现 "Mo Pet (Rust) Popup" 浮层窗口;拖拽后位置变化 + json 落盘;重启后双击弹出恢复保存位置;两窗并存截图 `/tmp/mo-p11-*.png`。
+
 #### MO_PET_MODE 开关与运行方式
 
 - 启动(Rust 路径,不依赖 WebKit/WebView):`env MO_PET_MODE=rust GDK_BACKEND=wayland /path/to/release/desktop-pet`
@@ -290,7 +304,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 | # | 借鉴点 | Hermes 做法 | Mo 落地 |
 |---|---|---|---|
-| 1 | **弹出覆盖窗口**(收益最大) | shift-click 把宠物弹到独立透明置顶窗,可拖拽、位置持久化、主窗最小化后仍可见 | Tauri 配置与命令能力已具备,加第二个透明置顶窗口即可 |
+| 1 | **弹出覆盖窗口**(收益最大) | shift-click 把宠物弹到独立透明置顶窗,可拖拽、位置持久化、主窗最小化后仍可见 | ✅ **已落地(P1-1,Rust 路径)**:双击主窗 toggle 弹出窗(普通 toplevel 可拖拽),位置持久化 popup-pos.json,详见 2.7 |
 | 2 | **完整手势表** | 拖拽移动 / 单击 / 双击 / shift-click 各司其职 | ✅ **已落地(P1-2)**:拖拽 + localStorage 持久化 / 单击双击分离 / 右键自定义菜单,详见 2.4 |
 | 3 | **精灵图替换 CSS 五官** | 状态 → sprite 行 → 帧动画,换宠物只换图集 | ✅ **已落地(P1-3)**:渲染器抽象层 + qqpet-codex,详见 2.3 |
 | 4 | **状态与渲染解耦** | 漫游用命令式 el.style,settle 才 commit React | ✅ **已落地(P1-4)**:usePetStatus + isEqual 值相等不 setState;CpuBubble 独立 2s 轮询,详见 2.5 |
