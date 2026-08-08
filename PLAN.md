@@ -59,7 +59,7 @@
 | P1-3 | **精灵图替换 CSS 五官** | ✅ **已完成(2026-08-08)**,见下方「P1-3 落地记录」 | `src/renderers/`(新建)、`src/assets/pets/qqpet-codex/`(新建)、`src/components/Pet.tsx`、`src/styles.css`、`src/vite-env.d.ts` | 素材已就位:qqpet-codex(来自 `~/.hermes/pets/qqpet-codex/`) | M | ✅ `pnpm build` 0 error;web 调试帧动画/眨眼/呼吸/greet 挥手;`cargo check` 通过(虚拟机) |
 | P1-4 | **状态渲染解耦** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | ✅ `pnpm build` 0 error;web 调试:气泡 2s 实时刷新,宠物仅状态切换才更新 |
 | P1-5 | **阈值告警通知** | ✅ **已完成(2026-08-09)**,见下方「P1-5 落地记录」 | 新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src-tauri/src/app.rs`、`src-tauri/src/pet_render/mod.rs`、`src-tauri/Cargo.toml`(notify-rust) | notify-rust(zbus,纯 Rust);本机通知 daemon 由 noctalia-shell 提供 | M | ✅ VM `cargo check` 0 error + release 构建;本机运行:高负载(故意 `yes > /dev/null`)→ overload 警示(跳跃动画+红边),解除后回 idle |
-| P1-6 | **抚摸反馈** | 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端词表/动作触发,零模型调用) | `src/components/Pet.tsx`、`src/styles.css` | 无 | S | web 调试:点击出爱心动画 |
+| P1-6 | **抚摸反馈** | ✅ **已完成(2026-08-09)**,见下方「P1-6 落地记录」 | `src-tauri/src/pet_render/mod.rs`(点击事件 + 爱心 cairo 叠加 + waving 撒娇状态切换) | 无(纯 cairo/GTK,零新依赖) | S | ✅ VM `cargo check` 0 error + release 构建;本机运行:点击宠物 → 爱心动画 + 撒娇 waving,双击 → greet 挥手 |
 | P1-7 | **桌面体验优化**(插队项) | ✅ **已完成(2026-08-08)**,见下方「桌面体验优化落地记录」 | `src-tauri/src/app.rs`(WebviewWindowBuilder 显式透明重建窗口 + `move_window` 命令)、`src-tauri/tauri.conf.json`(windows 清空 / version 0.1.0)、新建 `src/services/roam.ts`、`src/services/system.ts`、`src/components/Pet.tsx`、`src/components/CpuBubble.tsx` | 无 | S | ✅ `pnpm build` 0 error;`cargo check` 通过(虚拟机);本机运行验证(透明 / 漫游 / CPU 平滑) |
 
 **P1-3 落地记录(2026-08-08,已完成并验证)**:
@@ -125,6 +125,16 @@
 - **系统通知**:notify-rust(zbus 纯 Rust,无系统库)进入过载时发桌面通知(本机 niri 由 noctalia-shell 提供 `org.freedesktop.Notifications`);`MO_NOTIFY=0` 关闭;通知失败(无 daemon)静默忽略,宠物动画是主通道。
 - **与计划的差异**:① 通知用 notify-rust 而非 tauri-plugin-notification——纯 Rust 零系统库,monitor 线程直接调用,不依赖前端 JS API;② 未做「点击通知回到应用」(notify-rust 无回调能力,tauri-plugin 才有;桌面宠物常驻低价值,留注释后续);③ 前端 WebKit 路径未改(usePetStatus 已按 CPU 映射状态,两条路径独立)。
 - **验证**:VM `cargo check` 0 error;`pnpm tauri build --no-bundle` 出 release 二进制;本机运行 + 故意 `yes > /dev/null` 压 CPU → 约 3~8s 后宠物切 overload(跳跃动画 + 红边)+ 桌面通知,杀 yes 后约 5s 回 idle;截图 `/tmp/mo-p15-*.png`。
+
+**P1-6 落地记录(2026-08-09,已完成并验证)**:抚摸反馈——点击触发爱心/撒娇动画
+
+- **实现**(Rust 路径,`src-tauri/src/pet_render/mod.rs` 一处文件,渲染器核心 sprite.rs 零改动):
+  - **点击事件**(3.6 节):`area.connect_button_press_event` + `ev.click_count()` 区分单击/双击;单击 → 抚摸反馈(爱心 + 撒娇 waving 共 1.5s),双击 → greet 挥手(waving 1s);只响应左键(右键留给未来菜单);单击立即触发不做延迟区分(GTK 双击先派发 click_count=1,爱心/撒娇与挥手共存,观感自然)。
+  - **爱心叠加**(draw 回调):`hearts_until_ms` 截止时间戳驱动 1.5s 时间轴,3 颗粉红爱心(两瓣圆弧+尖角 cairo 心形)错峰冒出、上升+左右摇摆、`sin(π·p)` 淡入淡出;起点 = 实时宠物 bbox 顶部中心;过期自动清零。
+  - **撒娇状态切换**(状态驱动 ①.5):互动期强制 waving 并按剩余时长续期 action_until,到期由「动作到期必回 idle」回收(连点可延长);overload 优先不打断,爱心与红边共存。
+  - **共享状态**:`interact_until_ms`/`hearts_until_ms` 两个 `Arc<AtomicU64>` 截止时间戳(0=无),按钮回调写、状态驱动/draw 回调读,全在主线程原子操作。
+- **与计划的差异**:实现走 Rust 渲染路径(方案 D 落地后的正确归属),非计划里写的 `src/components/Pet.tsx` 前端路径;WebKit 前端路径保留原有 greet 挥手不受影响,后续 P2 对话情感反馈再在两条路径统一。
+- **验证**:VM `cargo check` 0 error;`pnpm tauri build --no-bundle` 出 release 二进制;本机运行点击宠物 → stderr「单击 → 抚摸反馈(爱心 + 撒娇 1500ms)」+「抚摸互动 → waving」,截图窗口区域出现粉红心形像素(1~1.5s 渐隐),双击 →「双击 → greet 挥手」;截图 `/tmp/mo-p16-*.png`。
 
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。

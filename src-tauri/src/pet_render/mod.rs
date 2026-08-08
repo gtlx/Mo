@@ -28,7 +28,7 @@ use glib::ControlFlow;
 use gtk::prelude::*;
 use gtk_layer_shell::LayerShell; // layer-shell trait(init_layer_shell/set_layer 等)
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -36,6 +36,18 @@ use crate::monitor::MonitorEvent;
 
 /// 动画帧间隔(ms)≈ 60fps。Rust 侧时钟驱动,不依赖前端。
 const FRAME_MS: u32 = 16;
+
+/// P1-6 抚摸反馈参数(2026-08-09):
+/// - 单击互动总时长:撒娇(waving)状态 + 飘爱心,共 1.5s;
+/// - 双击 greet 挥手:时长短一些(1s),沿用 waving 状态行;
+/// - 爱心:3 颗错峰冒出,每颗生命 800ms,上升 110px + 左右摇摆,
+///   半透明淡入淡出——纯 cairo 叠加在 blit 之上,渲染器核心零改动。
+const PET_INTERACT_MS: f64 = 1500.0;
+const PET_GREET_MS: f64 = 1000.0;
+const HEART_COUNT: usize = 3;
+const HEART_LIFE_MS: f64 = 800.0;
+const HEART_STAGGER_MS: f64 = 300.0;
+const HEART_RISE_PX: f64 = 110.0;
 
 /// 演示状态池(证明 set_state + 动画循环工作;`MO_DEMO=1` 时启用)。
 /// 每项 = (状态名, 权重)。自然节奏设计(2026-08-09 修复「切换太快」):
@@ -135,6 +147,34 @@ fn pick_action_for_load(seed: &mut u64, mid_load: bool) -> (&'static str, f64) {
     }
 }
 
+/// 当前时间戳(epoch 毫秒)。P1-6 抚摸反馈用「截止时间戳」在按钮回调
+/// (写入)与状态驱动/draw 回调(读取)之间共享——三者都在 GTK 主线程,
+/// 原子读写即够,不引入锁。
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// cairo 画一颗心形(两瓣圆弧 + 尖角),中心 (cx, cy)、半径 r、透明度 alpha。
+/// 用于抚摸反馈:单击后宠物上方飘起的爱心(半透明、随动画进度淡入淡出)。
+/// 纯 cairo 叠加在 blit 之上,渲染器核心(sprite.rs)零改动。
+/// 形状:左瓣圆心偏左上、右瓣圆心偏右上(半径 0.55r),两瓣从 π 扫到 0
+/// (cairo 默认坐标系下角度顺时针增大,即从左过顶部到右),再连到底部尖角。
+fn draw_heart(cr: &cairo::Context, cx: f64, cy: f64, r: f64, alpha: f64) {
+    let a = alpha.clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return;
+    }
+    cr.set_source_rgba(1.0, 0.35, 0.55, a); // 粉红爱心
+    cr.arc(cx - r * 0.55, cy - r * 0.55, r * 0.55, std::f64::consts::PI, 0.0); // 左瓣
+    cr.arc(cx + r * 0.55, cy - r * 0.55, r * 0.55, std::f64::consts::PI, 0.0); // 右瓣
+    cr.line_to(cx, cy + r * 1.1); // 右瓣终点连到底部尖角
+    cr.close_path(); // 闭合回左瓣起点
+    let _ = cr.fill();
+}
+
 /// 创建并显示 Rust 原生宠物窗口。
 /// 必须在 GTK 主线程调用(tauri setup 满足);窗口完全脱离 WebKit。
 /// `rx`:monitor 监测事件接收端(真实状态驱动;MO_DEMO=1 时忽略,
@@ -218,12 +258,20 @@ pub fn spawn_pet_window(
     // 状态机搬进 draw 回调,渲染器核心(sprite.rs)零改动。
     let overload_flag = Arc::new(AtomicBool::new(false));
 
+    // ── 抚摸反馈共享状态(P1-6)──
+    // 按钮回调(单击/双击)写入「截止时间戳」(epoch ms,0 = 无互动);
+    // 状态驱动(1s 粒度)读它强制 waving 撒娇;draw 回调(每帧)读它飘爱心。
+    // 全部在 GTK 主线程,原子读写即够;overload 红边与其共存不冲突。
+    let interact_until_ms = Arc::new(AtomicU64::new(0)); // 撒娇 waving 截止
+    let hearts_until_ms = Arc::new(AtomicU64::new(0)); // 爱心飘动截止(仅单击置位)
+
     // draw 帧计数器(诊断每 30 帧打印 + 红边脉冲相位共用)
     static DIAG_N: AtomicU32 = AtomicU32::new(0);
 
     // draw 回调:渲染一帧 → RGBA(straight)→ ARGB32(预乘)→ blit
     let r_draw = Arc::clone(&renderer);
     let overload_draw = Arc::clone(&overload_flag);
+    let hearts_draw = Arc::clone(&hearts_until_ms);
     area.connect_draw(move |_area, cr| {
         // ── 阶段2(2026-08-08):清除 GTK 主题背景填充 ──
         // GTK3 在 draw 回调前已按主题 CSS 渲染 widget 背景(实测默认主题
@@ -324,7 +372,82 @@ pub fn spawn_pet_window(
             let _ = cr.stroke();
         }
 
+        // ── 抚摸反馈爱心(P1-6):单击后宠物上方飘 3 颗爱心 ──
+        // 时间轴由点击时刻起算(截止时间戳 - 当前),总长 1.5s;
+        // 爱心小、半透明、上升 + 左右摇摆 + 错峰冒出,淡入淡出,
+        // 纯 cairo 叠加在 blit 之上,渲染器核心(sprite.rs)零改动;
+        // 与 overload 红边共存不冲突(红边在边缘、爱心在头顶)。
+        let hearts_end = hearts_draw.load(Ordering::Relaxed);
+        if hearts_end > 0 {
+            let now = now_millis();
+            if now < hearts_end {
+                let t_elapsed = (PET_INTERACT_MS - (hearts_end - now) as f64).max(0.0); // 已过 ms
+                // 实时计算宠物 bbox,爱心从头顶冒出(状态/呼吸/眨眼变化也能跟随)
+                let mut min_x = fw;
+                let mut min_y = fh;
+                let mut max_x = -1i32;
+                let mut max_y = -1i32;
+                for y in 0..fh {
+                    for x in 0..fw {
+                        if frame.pixels[((y * fw + x) * 4 + 3) as usize] > 0 {
+                            if x < min_x { min_x = x; }
+                            if x > max_x { max_x = x; }
+                            if y < min_y { min_y = y; }
+                            if y > max_y { max_y = y; }
+                        }
+                    }
+                }
+                if max_x >= 0 {
+                    let cx = (min_x + max_x) as f64 / 2.0;
+                    let top_y = min_y as f64;
+                    for i in 0..HEART_COUNT {
+                        let birth = 150.0 + i as f64 * HEART_STAGGER_MS;
+                        let p = (t_elapsed - birth) / HEART_LIFE_MS; // 0..1 生命进度
+                        if p < 0.0 || p >= 1.0 {
+                            continue;
+                        }
+                        // 上升 + 左右摇摆 + 横向错开,透明度淡入淡出
+                        let sway = (p * std::f64::consts::TAU * 2.0 + i as f64 * 1.7).sin() * 14.0;
+                        let y = top_y - 24.0 - p * HEART_RISE_PX;
+                        let alpha = 0.9 * (p * std::f64::consts::PI).sin();
+                        let r = 8.0 + i as f64 * 1.5;
+                        draw_heart(cr, cx + sway + (i as f64 - 1.0) * 20.0, y, r, alpha);
+                    }
+                }
+            } else {
+                hearts_draw.store(0, Ordering::Relaxed); // 过期清理,避免每帧重复比较
+            }
+        }
+
         glib::Propagation::Proceed
+    });
+
+    // ── 3.6 抚摸反馈事件(P1-6):单击 → 爱心+撒娇,双击 → greet 挥手 ──
+    // 单击立即触发(不做延迟区分):GTK 双击会先派发 click_count=1 再派发 2,
+    // 首次单击的爱心/撒娇与随后的挥手共存,观感自然(都是亲昵反馈)。
+    // 互动期强制 waving,到期由状态驱动的「动作到期必回 idle」统一回收。
+    let interact_btn = Arc::clone(&interact_until_ms);
+    let hearts_btn = Arc::clone(&hearts_until_ms);
+    area.connect_button_press_event(move |_a, ev| {
+        if ev.button() != 1 {
+            return glib::Propagation::Proceed; // 只响应左键(右键留给未来菜单)
+        }
+        let now = now_millis();
+        let cc = ev.click_count().unwrap_or(0);
+        if cc >= 2 {
+            // 双击 → greet 挥手(沿用 waving 状态行,时长短一些)
+            interact_btn.store(now + PET_GREET_MS as u64, Ordering::Relaxed);
+            eprintln!("[pet_render] 双击 → greet 挥手(waving {:.0}ms)", PET_GREET_MS);
+        } else {
+            // 单击 → 抚摸反馈:撒娇 waving + 飘爱心,共 1.5s
+            interact_btn.store(now + PET_INTERACT_MS as u64, Ordering::Relaxed);
+            hearts_btn.store(now + PET_INTERACT_MS as u64, Ordering::Relaxed);
+            eprintln!(
+                "[pet_render] 单击 → 抚摸反馈(爱心 + 撒娇 {:.0}ms)",
+                PET_INTERACT_MS
+            );
+        }
+        glib::Propagation::Stop
     });
 
     // ── 4. 动画循环:glib timeout 驱动 tick + queue_draw(Rust 侧时钟)──
@@ -355,6 +478,7 @@ pub fn spawn_pet_window(
 
     let r_drive = Arc::clone(&renderer);
     let overload_drive = Arc::clone(&overload_flag);
+    let interact_drive = Arc::clone(&interact_until_ms);
     let mut drive_now: f64 = 0.0;
     let mut idle_until: f64 = 4000.0; // 启动先定格 idle 4s 便于观察(后续 8~15s 随机)
     let mut action_until: f64 = -1.0; // 动作状态到期时间(-1 = 当前不在动作)
@@ -397,6 +521,28 @@ pub fn spawn_pet_window(
                         mid_load = level == crate::monitor::LoadLevel::Mid;
                     }
                 }
+            }
+        }
+
+        // ①.5 抚摸互动(P1-6):互动期内强制 waving 撒娇
+        // 单击/双击回调写入 interact_until_ms 截止时间戳;这里(1s 粒度)
+        // 检测到互动未到期就切到 waving,并按剩余时长续期 action_until,
+        // 到期由下方「动作到期必回 idle」统一回收——用户连点可延长撒娇。
+        // 过载优先:overload 期间不打断警示(爱心仍与红边共存,互不冲突)。
+        let now_epoch = now_millis();
+        let interact_end = interact_drive.load(Ordering::Relaxed);
+        if interact_end > now_epoch {
+            if current != "overload" && current != "waving" {
+                current = "waving";
+                r_drive.lock().unwrap().set_state("waving");
+                eprintln!(
+                    "[pet_render] 抚摸互动 → waving(撒娇,剩余 {:.0}ms)",
+                    (interact_end - now_epoch) as f64
+                );
+            }
+            if current == "waving" {
+                // 互动持续期间不断续期,保证到期才回 idle
+                action_until = drive_now + (interact_end - now_epoch) as f64;
             }
         }
 

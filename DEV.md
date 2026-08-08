@@ -202,7 +202,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 | 文件 | 职责 |
 |---|---|
-| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ **状态驱动**(P1-5:消费 monitor.rs 事件驱动真实状态,`MO_DEMO=1` 回退演示状态机;overload 红边警示) |
+| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ **状态驱动**(P1-5:消费 monitor.rs 事件驱动真实状态,`MO_DEMO=1` 回退演示状态机;overload 红边警示)+ **抚摸反馈**(P1-6:点击事件 → 爱心 cairo 叠加 + waving 撒娇状态切换) |
 | `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
 | `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/**交叉淡入 220ms**(2026-08-09 修复「从上往下卡一下」:旧「从 0 渐显」切换瞬间画面闪没,改旧帧定格淡出+新帧淡入)/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
 | `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
@@ -246,6 +246,16 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 - **订阅方 = 宠物渲染器**:`MO_PET_MODE=rust` 时 `app.rs` 把 receiver 传给 `spawn_pet_window`,mod.rs 状态驱动每秒消费事件;WebKit 路径不订阅(drop receiver,monitor 线程 send 返回 Err 被忽略,缓存写入不受影响)。
 - **系统通知**:进入过载时经 notify-rust(zbus 后端,纯 Rust)发 Linux 桌面通知(`org.freedesktop.Notifications`;niri 环境由 noctalia-shell 提供)。env `MO_NOTIFY=0` 关闭;通知失败(无 daemon)静默忽略——**宠物警示动画是主通道,通知是补充**。
 - **阈值可配**(env):`MO_CPU_OVERLOAD_THR`(85)/`MO_MEM_OVERLOAD_THR`(90)/`MO_CPU_MID_THR`(40,中负载分界,供状态驱动选权重池)/`MO_ENTER_OVERLOAD_MS`(3000)/`MO_EXIT_OVERLOAD_MS`(5000)。
+
+#### 抚摸反馈(P1-6 落地,2026-08-09)
+
+> 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端/轻量实现,零模型调用)。Rust 路径实现,**渲染器核心 sprite.rs 零改动**——爱心是 draw 回调里的 cairo 叠加,撒娇是状态驱动的 waving 状态切换。
+
+- **事件**(mod.rs 3.6 节,`area.connect_button_press_event`):单击 → 抚摸反馈(爱心 + 撒娇 waving 共 1.5s);双击 → greet 挥手(waving 1s,沿用现有 waving 状态行)。只响应左键(`ev.button()==1`,右键留给未来菜单);单击/双击用 `ev.click_count()` 区分(**单击立即触发不做延迟区分**:GTK 双击先派发 click_count=1 再派发 2,首次单击的爱心/撒娇与随后挥手共存,观感自然)。长按/拖动留待阶段3 拖拽接入时整合。
+- **爱心叠加**(draw 回调):单击置位 `hearts_until_ms`(截止时间戳),1.5s 内飘 3 颗粉红爱心——cairo 两瓣圆弧+尖角画心形(`draw_heart`),每颗生命 800ms、错峰 300ms 冒出、上升 110px + 左右摇摆(sin 相位错开)、透明度 `sin(π·p)` 淡入淡出;爱心起点 = **实时计算宠物 bbox 顶部中心**(状态/呼吸/眨眼变化也能跟随);过期自动清零原子标志。与 overload 红边**共存不冲突**(红边在边缘、爱心在头顶)。
+- **撒娇状态切换**(状态驱动 ①.5 节):按钮回调写 `interact_until_ms` 截止时间戳;状态驱动(1s 粒度)检测互动未到期 → 切 waving 并按剩余时长续期 `action_until`,到期由既有「动作到期必回 idle」统一回收(连点可延长撒娇);**overload 优先**:过载期间不打断警示(爱心仍与红边共存)。
+- **共享状态**:`interact_until_ms`/`hearts_until_ms` 两个 `Arc<AtomicU64>`(截止时间戳,0=无),按钮回调(写)与状态驱动/draw 回调(读)全在 GTK 主线程,原子读写即够,不引入锁。
+- **验证**:VM `cargo check` 0 error + `pnpm tauri build --no-bundle` release;本机运行点击宠物 → stderr 打印「单击 → 抚摸反馈」/「抚摸互动 → waving」,截图窗口区域出现粉红心形像素(1~1.5s 渐隐),双击打印「双击 → greet 挥手」。
 
 #### MO_PET_MODE 开关与运行方式
 
