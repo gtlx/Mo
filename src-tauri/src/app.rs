@@ -199,6 +199,16 @@ pub fn run() {
             move_window,
         ])
         .setup(|app| {
+            // ── 方案 D 开关:MO_PET_MODE=rust → Rust 原生宠物窗口 ──
+            // (透明自绘,绕开 WebKitGTK alpha 硬伤;详见 pet_render/mod.rs)
+            // 默认(未设置/其他值)→ 现有 WebKit 窗口路径,行为不变。
+            if std::env::var("MO_PET_MODE").as_deref() == Ok("rust") {
+                crate::pet_render::spawn_pet_window(app)?;
+                start_monitor(app.handle().clone());
+                setup_tray(app).ok();
+                return Ok(());
+            }
+
             // 桌面体验优化:显式 WebviewWindowBuilder 重建主窗口,强制 wry 透明路径。
             // (tauri.conf.json 的 windows 已清空,窗口完全由这里创建——不依赖 config,
             //  链式 .transparent(true) 直接作用于 WebviewWindowBuilder,绕开 niri/Wayland

@@ -188,6 +188,52 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 - CpuBubble.tsx 对最近 5 次采样做滑动平均(`SMOOTH_WINDOW = 5`)后再显示,数字稳定不随单次采样大幅跳动;宠物主体状态判定(usePetStatus)仍用原始值,滑动平均只影响气泡展示。
 
+### 2.7 Rust 原生渲染(方案D,2026-08-08 阶段1落地)
+
+> 背景:2.6 节结论——透明窗口卡在 **WebKitGTK 内容层 alpha 合成硬伤**(Wayland/X11 两路 webview 内容层均不透明,灰底 (80,80,80))。方案D = 渲染下沉 Rust:窗口内容由 Rust 侧自绘 RGBA 像素缓冲,完全绕开 WebKit,从根上消除「内容层不合成 alpha」问题。
+
+#### 架构:宠物窗口 Rust 绘制 / 面板 React(并存)
+
+- **双渲染路径共存**,由环境变量 `MO_PET_MODE` 切换(app.rs setup):
+  - `MO_PET_MODE=rust`(未设/其他值不触发)→ `pet_render::spawn_pet_window(app)` 创建 GTK 原生宠物窗口,不创建任何 Webview;monitor 线程 + 系统托盘照常启动。
+  - 默认(未设置)→ 现有 WebKit 路径(WebviewWindowBuilder 显式透明),行为不变。**两条路径并存,互不删除**;面板/设置等 React UI 后续阶段在 WebKit 窗口或 layer-shell 面板窗口呈现。
+- 阶段1 只做「Rust 宠物窗口 + 演示动画循环」,面板(React)尚未挂到 Rust 窗口——demo 状态序列(见下)证明 set_state + 动画循环工作。
+
+#### pet_render 模块结构(src-tauri/src/pet_render/,5 文件)
+
+| 文件 | 职责 |
+|---|---|
+| `mod.rs` | 窗口创建(`spawn_pet_window`)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ 演示状态序列 |
+| `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
+| `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/淡入 180ms/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
+| `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
+| `factory.rs` | 渲染器工厂:按 `type` 分发(sprite 实现;live2d/spine 报错暴露)。素材来源:env `MO_PET_DIR` 优先(可更换),默认编译期内嵌 `src/assets/pets/qqpet-codex/`(include_str!/include_bytes!) |
+
+**透明实现原理**(mod.rs 头注释,绕开 WebKit 的三层):
+1. 内容层:渲染器直接产出 RGBA8 像素缓冲(透明像素 alpha=0),不经 WebKit;
+2. 窗口层:GTK 窗口 `app_paintable` + RGBA visual + `set_decorated(false)` + `skip_taskbar` + `keep_above`;
+3. blit:draw 回调把 RGBA(straight)→ cairo ARGB32(预乘)一次贴图。
+
+**阶段1 实测结论(2026-08-08,如实)**:窗口层透明**已达成**(四角圆角外透出下层,ARGB 表面混合生效、无边框/无标题栏/置顶均验证);**内容层透明未达成**——GTK 主题背景先填充了 DrawingArea,企鹅 blit 在主题背景上(默认主题 (80,80,80) 灰;`GTK_THEME=Adwaita:light` 后变 (78,201,176),实锤主题背景填充,与 WebKitGTK alpha 无关)。**待修(阶段2,一行)**:draw 回调开头 `cr.set_operator(cairo::Operator::Source)` + `set_source_rgba(0,0,0,0)` + `paint()` 清透明,或对 DrawingArea 设 `background: transparent` CSS。
+
+#### MO_PET_MODE 开关与运行方式
+
+- 启动(Rust 路径,不依赖 WebKit/WebView):`env MO_PET_MODE=rust /path/to/release/desktop-pet`
+  - niri/Wayland 下推荐仍带 `GDK_BACKEND=wayland`(X11 下 GTK3 RGBA visual 会强制 CSD 白标题栏,属已知 Pitfall 22 同类问题);
+  - 素材覆盖:`MO_PET_DIR=<目录>` 从磁盘读 pet.json + spritesheet.png;`MO_PET_SCALE=<f64>` 覆盖显示缩放;
+  - 渲染器尺寸 = 帧尺寸 × scale(qqpet-codex 默认 192×208 × 0.4 ≈ 77×83 窗口)。
+- 演示状态序列 `DEMO_STATES = ["idle", "waving", "thinking", "working", "jumping"]` 周期切换,证明状态机 + 动画循环工作;后续由面板事件驱动。
+
+#### layer-shell 后续接入点(2026-08-08 实测)
+
+- gtk-layer-shell crate 与 Cargo.lock 的 gtk 0.18 版本兼容,但需要系统库 libgtk-layer-shell(VM 编译机缺且 sudo 需密码装不了)→ 阶段1 降级为普通无边框窗口 + ARGB 自绘。
+- 接入点已留:`window.upcast_ref::<gtk::Window>()` 拿到 GTK 窗口后调 `gtk_layer::LayerShell::for_window(...)` 提升即可(poe2-overlay 先例);overlay 层语义(悬浮全屏之上/穿透点击)后续补。
+
+#### 与 WebKit 路径并存说明
+
+- **不删 WebKit 路径**:默认模式仍是 Tauri webview 窗口(面板/设置等 React UI 所在);Rust 宠物窗口是并行方案,不替代。
+- 渲染器接口 Rust 侧与前端对齐(PetRenderer 同名同语义),素材协议同一份 pet.json,前端渲染器/素材可直接复用,无概念割裂。
+
 ## 3. 模块化评估与改进计划
 
 **结论:整体结构清晰,属于 Tauri + React 标准分层,小规模下优秀。** 前端分层(组件/hooks/services/i18n/types)职责明确,services 层统一封装命令值得保留。

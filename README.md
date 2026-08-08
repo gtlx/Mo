@@ -25,6 +25,7 @@
 - **系统托盘**：右键托盘图标 → 显示/隐藏窗口、退出（隐藏后可通过托盘恢复）
 - **多语言**：中文 / English
 - **透明悬浮窗**：无边框、置顶、跳过任务栏；Rust 侧强制 wry 透明路径（niri/Wayland 需 `GDK_BACKEND=wayland` 启动）
+- **Rust 原生渲染（方案D）**：`MO_PET_MODE=rust` 启动时走 GTK 自绘宠物窗口（RGBA 像素缓冲直出，不依赖 WebKit/WebView），无边框置顶悬浮、动画流畅；与 WebKit 路径并存，默认模式不变（阶段1：窗口层透明已达成，内容层待清主题背景，见 DEV.md 2.7）
 - **桌面漫游**：宠物在桌面范围内自动走动（随机选点 / 平滑移动 / 到达停留 / 边缘回头），用户拖拽时自动暂停
 - **CPU 平滑**：气泡数值最近 5 次采样滑动平均，显示稳定不跳动
 - **高性能**：Rust 后台线程轮询系统信息，前端零阻塞；渲染循环不触发 React re-render
@@ -90,7 +91,13 @@ Mo/
 │
 ├── src-tauri/                # 后端（Rust）
 │   ├── src/
-│   │   ├── app.rs            # 命令 + 后台监测 + 系统托盘
+│   │   ├── app.rs            # 命令 + 后台监测 + 系统托盘 + MO_PET_MODE 开关
+│   │   ├── pet_render/       # 方案D：Rust 原生宠物渲染（GTK 自绘透明窗口）
+│   │   │   ├── mod.rs        # 窗口创建 + 动画循环（spawn_pet_window）
+│   │   │   ├── renderer.rs   # PetRenderer 接口 + RGBA 帧缓冲
+│   │   │   ├── sprite.rs     # 精灵图渲染器（裁帧 + 呼吸/眨眼/淡入）
+│   │   │   ├── manifest.rs   # pet.json 协议解析
+│   │   │   └── factory.rs    # 渲染器工厂（素材内嵌/可更换）
 │   │   ├── lib.rs
 │   │   └── main.rs
 │   ├── Cargo.toml

@@ -92,6 +92,24 @@
 - **CPU 平滑**:CpuBubble.tsx 最近 5 次滑动平均后展示,数字稳定(状态判定仍用原始值)。
 - **版本对齐**:tauri.conf.json version 1.0.0 → 0.1.0(与 Cargo.toml 一致,顺手修复 Pitfall 16 遗留项)。
 
+**方案D重构阶段1落地记录(2026-08-08,已完成并验证)**:Rust 原生宠物渲染(透明自绘,绕开 WebKitGTK alpha 硬伤)
+
+- **背景**:2.6 桌面体验优化的结论是透明窗口卡在 WebKitGTK 内容层 alpha 合成(Wayland/X11 两路内容层均不透明)。方案D = 渲染下沉 Rust:窗口内容由 Rust 侧自绘 RGBA 像素缓冲,不经 WebKit,根除灰底。
+- **实现**(新建 `src-tauri/src/pet_render/` 5 文件 + app.rs 开关):
+  - `mod.rs`:`spawn_pet_window(app)` 创建 GTK 原生宠物窗口(无边框/置顶/跳过任务栏/RGBA visual + app_paintable/DrawingArea 自绘),glib timeout 16ms 动画循环,演示状态序列 `["idle","waving","thinking","working","jumping"]` 周期切换;
+  - `renderer.rs`:`PetRenderer` 统一接口(与前端 types.ts 对齐)+ `RenderFrame` RGBA8 直通缓冲;
+  - `sprite.rs`:`SpriteRenderer` 精灵图裁帧,对齐前端「自然动效」四要素,**纯内部时钟**(tick 喂 dt,不依赖外部时间源);
+  - `manifest.rs`/`factory.rs`:pet.json 协议解析 + 工厂分发(素材 env `MO_PET_DIR` 优先,默认编译期内嵌 qqpet-codex);
+  - `app.rs`:`MO_PET_MODE=rust` 环境变量开关——为 rust 时走 Rust 宠物窗口(不创建 webview),monitor + 托盘照常;默认仍走 WebKit 路径,并存不删。
+- **依赖**:Cargo.toml 增 `gtk = "0.18"`(复用 tauri 依赖树的 0.18 系,零新增系统库)+ `image = "0.25"`(仅 png,复用 image-png feature 引入的 0.25 系)。
+- **layer-shell 说明**:gtk-layer-shell crate 与 gtk 0.18 兼容但需要系统库 libgtk-layer-shell(VM 缺, sudo 需密码装不了)→ 阶段1 降级为普通无边框窗口 + ARGB 自绘;接入点已留(upcast 到 gtk::Window 后 for_window 提升,poe2-overlay 先例),overlay 语义后续补。
+- **验证(如实,透明半达成)**:VM `pnpm tauri build --no-bundle` 出 release 二进制;本机 `env MO_PET_MODE=rust GDK_BACKEND=wayland` 运行,**企鹅渲染成功(睡觉帧:盖被子+Zzz)、无边框/无标题栏、置顶悬浮、动画在跑(两帧 33% 像素差异)**;**窗口层透明已达成**(窗口四角 niri 圆角外透出下层桌面/文档内容 (243,246,252))。**但内容层仍有 (80,80,80) 灰底**:draw 回调只把企鹅像素 blit 上去,GTK 主题背景先填充了 DrawingArea——换 `GTK_THEME=Adwaita:light` 后灰底变薄荷绿 (78,201,176),实锤主题背景填充。**根因与 WebKit 路径不同(不是 WebKitGTK alpha,是 GTK widget 主题背景),修法明确:draw 回调开头 `cr.set_operator(cairo::Operator::Source)` + `set_source_rgba(0,0,0,0)` + `paint()` 清透明(或 CSS background: transparent),下一阶段一行修复**。截图:`/tmp/mo-rust-final-1.png` / `/tmp/mo-rust-final-2.png` / `/tmp/mo-rust-context.png` / `/tmp/mo-rust-theme-light.png`。
+- **与计划的差异**:
+  1. 计划方案阶梯中方案D标「治本,大改」,本阶段按「阶段1 = 宠物窗口 + 演示动画」实施,面板(React)未挂到 Rust 窗口,留待阶段2;
+  2. gtk-layer-shell 因 VM 系统库缺失降级,overlay 层语义后补(计划中方案C 的 layer-shell 提升未做);
+  3. 素材内嵌(include_bytes)优于计划假设的运行时路径依赖——发布后素材随二进制走。
+- **遗留(下一阶段)**:面板/设置 UI 挂到 Rust 宠物窗口(点击事件 → set_state);layer-shell 提升 + 穿透点击;MO_PET_MODE=rust 下漫游/拖拽。
+
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。
 **app.rs 拆分**(DEV.md 弱点 #1)建议在 P1-5 做 monitor.rs 抽取时一并完成(monitor/tray/window/commands 四件套),避免单独一次大重构。
