@@ -4,6 +4,7 @@
 // ============================================================
 import { invoke } from "@tauri-apps/api/core";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import type { SystemInfo } from "../types";
 
 // ---------- 环境检测与 web 调试 mock ----------
@@ -117,6 +118,13 @@ export async function getWindowPosition(): Promise<{ x: number; y: number }> {
   if (!isTauri) return { x: 0, y: 0 };
   const pos = await getCurrentWindow().outerPosition();
   return { x: pos.x, y: pos.y };
+}
+
+/** 设置主窗口绝对位置(物理像素):拖拽结束持久化恢复 / 启动位置恢复 */
+export async function setWindowPosition(x: number, y: number): Promise<void> {
+  // web 调试:无窗口可移动,no-op
+  if (!isTauri) return;
+  await getCurrentWindow().setPosition(new PhysicalPosition(x, y));
 }
 
 /** 获取主窗口尺寸(物理像素) */
