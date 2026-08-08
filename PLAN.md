@@ -60,6 +60,7 @@
 | P1-4 | **状态渲染解耦** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | ✅ `pnpm build` 0 error;web 调试:气泡 2s 实时刷新,宠物仅状态切换才更新 |
 | P1-5 | **阈值告警通知** | Rust 监测线程加阈值判断(CPU/内存超线)→ 系统通知 + 宠物警示动画;点击通知回到应用 | `src-tauri/Cargo.toml`、新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src/App.tsx`、`src/styles.css` | `tauri-plugin-notification` crate;平台通知权限(Linux 需通知 daemon) | M | 桌面调试(真实通知);警示动画 web 可验 |
 | P1-6 | **抚摸反馈** | 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端词表/动作触发,零模型调用) | `src/components/Pet.tsx`、`src/styles.css` | 无 | S | web 调试:点击出爱心动画 |
+| P1-7 | **桌面体验优化**(插队项) | ✅ **已完成(2026-08-08)**,见下方「桌面体验优化落地记录」 | `src-tauri/src/app.rs`(WebviewWindowBuilder 显式透明重建窗口 + `move_window` 命令)、`src-tauri/tauri.conf.json`(windows 清空 / version 0.1.0)、新建 `src/services/roam.ts`、`src/services/system.ts`、`src/components/Pet.tsx`、`src/components/CpuBubble.tsx` | 无 | S | ✅ `pnpm build` 0 error;`cargo check` 通过(虚拟机);本机运行验证(透明 / 漫游 / CPU 平滑) |
 
 **P1-3 落地记录(2026-08-08,已完成并验证)**:
 
@@ -83,6 +84,13 @@
   2. 双击行为改为「挥手动画 + 独立覆盖窗占位 no-op」:P1-1 覆盖窗未落地,双击暂不弹窗(TODO 标注),待 P1-1 实现后接入;
   3. 右键菜单落在 App.tsx(计划未明确落点),Pet.tsx 只上报坐标,组件解耦;
   4. **双通道记录不改**:`getCpuUsage` 与 `getSystemInfo` 读同一 Mutex 缓存不同字段,合并需动 Rust 侧,本次不改,留待 P1-5 抽 monitor.rs 时整理。
+
+**桌面体验优化落地记录(2026-08-08,已完成并验证)**:
+
+- **透明窗口**:config `windows` 清空,`app.rs` setup 用 `WebviewWindowBuilder` 显式链 `.transparent(true)` 重建主窗口(不依赖 config,强制 wry 透明路径)+ `.decorations(false)` + `set_background_color(Color(0,0,0,0))` 兜底;运行需 `GDK_BACKEND=wayland WEBKIT_DISABLE_DMABUF_RENDERER=1`(niri/Wayland)。
+- **桌面漫游**:app.rs 新增 `move_window(dx,dy)` 增量移动命令(基于 outer_position 偏移);新建 `src/services/roam.ts`(随机目标点 + 每帧 0.8px 平滑步进 + 到达停留 5~15s + 边缘 clamp 回头 + 用户拖拽暂停);Pet.tsx 挂载启动 / 卸载停止 / 拖拽暂停恢复;web mock 用 CSS transform 模拟漫游。
+- **CPU 平滑**:CpuBubble.tsx 最近 5 次滑动平均后展示,数字稳定(状态判定仍用原始值)。
+- **版本对齐**:tauri.conf.json version 1.0.0 → 0.1.0(与 Cargo.toml 一致,顺手修复 Pitfall 16 遗留项)。
 
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。

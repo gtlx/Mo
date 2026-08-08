@@ -24,6 +24,7 @@ import { usePetStatus } from "../hooks/useSystemInfo";
 import { createRenderer } from "../renderers";
 import type { PetRenderer } from "../renderers/types";
 import { qqpetCodexManifest } from "../assets/pets/qqpet-codex";
+import { startRoam, stopRoam, pauseRoam, resumeRoam } from "../services/roam";
 import CpuBubble from "./CpuBubble";
 
 /** 拖拽与单击判定的移动阈值(px):位移超过则视为拖拽,不再算单击 */
@@ -105,9 +106,12 @@ export default function Pet({ onClick, onDoubleClick, onContextMenu }: PetProps)
       renderer.play(status);
     }
     rendererRef.current = renderer;
+    // 桌面漫游:挂载即启动(Tauri 移动窗口 / mock 平移元素),卸载停止
+    void startRoam(petRef.current);
     return () => {
       renderer.destroy();
       rendererRef.current = null;
+      stopRoam();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -149,6 +153,8 @@ export default function Pet({ onClick, onDoubleClick, onContextMenu }: PetProps)
       };
       isDraggingRef.current = false;
       setDragging(false);
+      // 用户按下即暂停桌面漫游,避免「漫游移动窗口 + 拖拽移动宠物」叠加冲突
+      pauseRoam();
       // 捕获指针:鼠标移出元素后仍能收到 move/up(合成事件环境可能抛错,忽略即可)
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -197,6 +203,8 @@ export default function Pet({ onClick, onDoubleClick, onContextMenu }: PetProps)
       });
     }
     dragRef.current = null;
+    // 拖拽结束恢复桌面漫游(mock 下内部会重同步基准位置,避免位置跳变)
+    resumeRoam();
   }, []);
 
   /** 单击:延迟 CLICK_DELAY 判定;期间再来一次点击则取消,交给双击处理 */

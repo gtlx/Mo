@@ -6,7 +6,8 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, Runtime,
+    window::Color,
+    Manager, PhysicalPosition, Position, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
 
 // ── 系统信息结构 ──
@@ -78,6 +79,26 @@ async fn toggle_always_on_top<R: Runtime>(
 #[tauri::command]
 async fn close_app<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     app.exit(0);
+    Ok(())
+}
+
+/// 桌面漫游:按增量移动主窗口(物理像素)。
+/// 基于当前窗口位置偏移 dx/dy,由前端漫游服务(roam.ts)逐帧调用。
+#[tauri::command]
+async fn move_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    dx: f64,
+    dy: f64,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        window
+            .set_position(Position::Physical(PhysicalPosition {
+                x: pos.x + dx as i32,
+                y: pos.y + dy as i32,
+            }))
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -175,8 +196,32 @@ pub fn run() {
             set_window_visible,
             toggle_always_on_top,
             close_app,
+            move_window,
         ])
         .setup(|app| {
+            // 桌面体验优化:显式 WebviewWindowBuilder 重建主窗口,强制 wry 透明路径。
+            // (tauri.conf.json 的 windows 已清空,窗口完全由这里创建——不依赖 config,
+            //  链式 .transparent(true) 直接作用于 WebviewWindowBuilder,绕开 niri/Wayland
+            //  下 config 透明配置在 webview 内容层不生效的问题)
+            let window = WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::App("index.html".into()),
+            )
+            .title("Desktop Pet")
+            .inner_size(200.0, 200.0)
+            .resizable(false)
+            .transparent(true) // 显式透明:强制 wry transparent 路径
+            .decorations(false) // 无标题栏
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(true)
+            .build()
+            .expect("failed to build main window");
+
+            // 兜底(第二保险):显式把窗口背景设为全透明,与 builder/config 三处对齐
+            let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+
             start_monitor(app.handle().clone());
             setup_tray(app).ok();
             Ok(())

@@ -162,6 +162,32 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 - **评估**:两个命令读的是同一 `Mutex` 缓存的不同字段,合并为单一 `get_system_info` 调用需动 Rust 侧(app.rs 命令定义)与全部调用方,收益有限、风险不小;
 - **结论(2026-08-08)**:**本次不改**,保留双通道;留待 P1-5 抽 `monitor.rs` 时与 app.rs 拆分(第 3 节弱点 #1)一并整理。
 
+### 2.6 桌面体验优化(透明窗口 / 桌面漫游 / CPU 平滑,2026-08-08 落地)
+
+> 三项桌面体验优化一起落地:透明悬浮窗、宠物桌面漫游、CPU 数值平滑。前两项涉及 Rust 侧(app.rs)与前端协作,第三项纯前端。
+
+#### 透明窗口(强制 wry 透明路径)
+
+- **背景**:tauri.conf.json 原本就有 `transparent: true` + `decorations: false`,CSS 也是透明,但 niri/Wayland 下启动进程继承 `GDK_BACKEND=x11`(走 xwayland)时出现白标题栏 + 灰底;显式 `GDK_BACKEND=wayland` 后标题栏消失但 webview 内容层仍是 (80,80,80) 灰——config 透明配置在 WebKitGTK 的 alpha 合成路径上未生效。
+- **落地**(app.rs setup):config 的 `windows` 数组清空(`"windows": []`),窗口改为 `WebviewWindowBuilder` 显式创建并**链式 `.transparent(true)`**(不依赖 config,强制 wry transparent 路径)+ `.decorations(false)` + `.always_on_top(true)` + `.skip_taskbar(true)`;再调 `window.set_background_color(Some(Color(0,0,0,0)))` 作第二保险。
+- **运行要求**(niri/Wayland):必须 `env GDK_BACKEND=wayland WEBKIT_DISABLE_DMABUF_RENDERER=1` 启动,否则 xwayland 下出现白标题栏 / GBM buffer 失败灰屏。
+- **实测结论**:透明窗口在 Wayland(`GDK_BACKEND=wayland`)/ X11(xwayland)两路均已尝试:标题栏问题已解决(无边框生效),但 webview 内容层透明均受 **WebKitGTK alpha 合成限制**(内容层始终不透明,实测为 (80,80,80) 灰底)——config 透明配置与 WebviewWindowBuilder 显式 `.transparent(true)` 在 WebKitGTK 上都不生效,属引擎硬伤,非配置问题。
+- **后续方案(已立项)**:方案D——渲染下沉 Rust(WebKitGTK alpha 合成不可用时,窗口内容改由 Rust 侧自绘/合成),见 agent 待办,本次不实施。
+
+#### 桌面漫游(roam.ts + move_window)
+
+- **Rust**:app.rs 新增 `move_window(dx, dy)` 命令——读取主窗口 `outer_position()` 后按增量 `set_position(Position::Physical(...))`(物理像素),由前端逐帧调用。
+- **前端**:新建 `src/services/roam.ts` 单例漫游控制器:
+  - 随机目标点(屏幕内留 `EDGE_MARGIN=60px` 边距);每帧按 `STEP_PER_FRAME=0.8px` 平滑步进;
+  - 到达后停留 5~15s 随机再选点;位置越界自动 clamp 并重选目标(「边缘回头」);
+  - Tauri 环境调 `moveWindow` 移动窗口;web mock 用 CSS transform 平移宠物元素等效模拟;
+  - 屏幕尺寸:Tauri 走 `currentMonitor()`(物理像素),mock 走 `window.innerWidth/Height`。
+- **暂停机制**:Pet.tsx 挂载时 `startRoam(petRef.current)`、卸载 `stopRoam()`;pointerdown `pauseRoam()`、pointerup/cancel `resumeRoam()`——用户拖拽时漫游暂停,避免「窗口移动 + 拖拽移动」叠加;mock 下 resume 会重同步基准位置避免跳变。
+
+#### CPU 平滑
+
+- CpuBubble.tsx 对最近 5 次采样做滑动平均(`SMOOTH_WINDOW = 5`)后再显示,数字稳定不随单次采样大幅跳动;宠物主体状态判定(usePetStatus)仍用原始值,滑动平均只影响气泡展示。
+
 ## 3. 模块化评估与改进计划
 
 **结论:整体结构清晰,属于 Tauri + React 标准分层,小规模下优秀。** 前端分层(组件/hooks/services/i18n/types)职责明确,services 层统一封装命令值得保留。

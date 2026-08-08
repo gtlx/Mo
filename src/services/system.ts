@@ -3,6 +3,7 @@
 // 铁律:组件 / hooks 禁止直接调用 @tauri-apps/api,一律经本层转发
 // ============================================================
 import { invoke } from "@tauri-apps/api/core";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import type { SystemInfo } from "../types";
 
 // ---------- 环境检测与 web 调试 mock ----------
@@ -12,8 +13,10 @@ import type { SystemInfo } from "../types";
  * 浏览器直接访问 vite devUrl(http://localhost:1420)时,window.__TAURI_INTERNALS__
  * 不存在(invoke 会报 Cannot read properties of undefined),此时走 mock 数据,
  * 保证 web 调试下界面「活」起来;桌面运行时自动切换回真实命令,调用方零改动。
+ * (导出给 roam.ts 等模块复用)
  */
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /**
  * 生成 0~100 随机 CPU 模拟值。
@@ -97,4 +100,41 @@ export async function closeApp(): Promise<void> {
   // web 调试:no-op(浏览器内不应关闭页面)
   if (!isTauri) return;
   await invoke("close_app");
+}
+
+// ---------- 桌面漫游支撑命令 ----------
+
+/** 按增量移动主窗口(物理像素):由 roam.ts 逐帧调用,实现桌面漫游 */
+export async function moveWindow(dx: number, dy: number): Promise<void> {
+  // web 调试:无窗口可移动,no-op(mock 漫游走 CSS transform)
+  if (!isTauri) return;
+  await invoke("move_window", { dx, dy });
+}
+
+/** 获取主窗口当前位置(物理像素) */
+export async function getWindowPosition(): Promise<{ x: number; y: number }> {
+  // web 调试:返回原点,mock 漫游以元素 rect 为基准,不依赖此值
+  if (!isTauri) return { x: 0, y: 0 };
+  const pos = await getCurrentWindow().outerPosition();
+  return { x: pos.x, y: pos.y };
+}
+
+/** 获取主窗口尺寸(物理像素) */
+export async function getWindowSize(): Promise<{ width: number; height: number }> {
+  // web 调试:退回视口尺寸
+  if (!isTauri) return { width: window.innerWidth, height: window.innerHeight };
+  const size = await getCurrentWindow().outerSize();
+  return { width: size.width, height: size.height };
+}
+
+/** 获取屏幕可用尺寸(物理像素,Tauri 取当前显示器;web mock 取视口) */
+export async function getScreenSize(): Promise<{ width: number; height: number }> {
+  // web 调试:浏览器视口即「桌面」
+  if (!isTauri) return { width: window.innerWidth, height: window.innerHeight };
+  const monitor = await currentMonitor();
+  if (monitor) {
+    return { width: monitor.size.width, height: monitor.size.height };
+  }
+  // 拿不到显示器信息时退回窗口尺寸,保证漫游不会越界
+  return getWindowSize();
 }
