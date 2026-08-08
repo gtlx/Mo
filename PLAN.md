@@ -58,7 +58,7 @@
 | P1-2 | **手势表** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、`src/App.tsx`、`src/styles.css` | 无 | S–M | ✅ `pnpm build` 0 error;web 调试:拖拽、双击挥手、右键菜单、位置刷新后保留 |
 | P1-3 | **精灵图替换 CSS 五官** | ✅ **已完成(2026-08-08)**,见下方「P1-3 落地记录」 | `src/renderers/`(新建)、`src/assets/pets/qqpet-codex/`(新建)、`src/components/Pet.tsx`、`src/styles.css`、`src/vite-env.d.ts` | 素材已就位:qqpet-codex(来自 `~/.hermes/pets/qqpet-codex/`) | M | ✅ `pnpm build` 0 error;web 调试帧动画/眨眼/呼吸/greet 挥手;`cargo check` 通过(虚拟机) |
 | P1-4 | **状态渲染解耦** | ✅ **已完成(2026-08-08)**,见下方「P1-2/P1-4 落地记录」 | `src/components/Pet.tsx`、新建 `src/components/CpuBubble.tsx`、`src/hooks/useSystemInfo.ts` | 无 | S | ✅ `pnpm build` 0 error;web 调试:气泡 2s 实时刷新,宠物仅状态切换才更新 |
-| P1-5 | **阈值告警通知** | Rust 监测线程加阈值判断(CPU/内存超线)→ 系统通知 + 宠物警示动画;点击通知回到应用 | `src-tauri/Cargo.toml`、新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src/App.tsx`、`src/styles.css` | `tauri-plugin-notification` crate;平台通知权限(Linux 需通知 daemon) | M | 桌面调试(真实通知);警示动画 web 可验 |
+| P1-5 | **阈值告警通知** | ✅ **已完成(2026-08-09)**,见下方「P1-5 落地记录」 | 新建 `src-tauri/src/monitor.rs`(从 app.rs 抽出)、`src-tauri/src/app.rs`、`src-tauri/src/pet_render/mod.rs`、`src-tauri/Cargo.toml`(notify-rust) | notify-rust(zbus,纯 Rust);本机通知 daemon 由 noctalia-shell 提供 | M | ✅ VM `cargo check` 0 error + release 构建;本机运行:高负载(故意 `yes > /dev/null`)→ overload 警示(跳跃动画+红边),解除后回 idle |
 | P1-6 | **抚摸反馈** | 点击/抚摸宠物 → 飘爱心/撒娇动画(纯前端词表/动作触发,零模型调用) | `src/components/Pet.tsx`、`src/styles.css` | 无 | S | web 调试:点击出爱心动画 |
 | P1-7 | **桌面体验优化**(插队项) | ✅ **已完成(2026-08-08)**,见下方「桌面体验优化落地记录」 | `src-tauri/src/app.rs`(WebviewWindowBuilder 显式透明重建窗口 + `move_window` 命令)、`src-tauri/tauri.conf.json`(windows 清空 / version 0.1.0)、新建 `src/services/roam.ts`、`src/services/system.ts`、`src/components/Pet.tsx`、`src/components/CpuBubble.tsx` | 无 | S | ✅ `pnpm build` 0 error;`cargo check` 通过(虚拟机);本机运行验证(透明 / 漫游 / CPU 平滑) |
 
@@ -116,9 +116,19 @@
 - **验证受阻说明**:像素级三要素验证(企鹅/透明/动画)遇屏幕空闲自动锁屏(noctalia-shell ext-session-lock),普通窗口不可见;非像素证据:进程稳定无崩溃、niri 浮层窗口创建正常、CPU ~3.9% 持续(glib 16ms 动画循环活跃=动画在跑)。解锁后补验命令见 DEV.md。
 - **遗留(阶段3)**:面板/设置 UI 挂到 Rust 宠物窗口;layer-shell 提升 + 穿透点击;MO_PET_MODE=rust 下漫游/拖拽。
 
+**P1-5 落地记录(2026-08-09,已完成并验证)**:阈值告警 + monitor.rs 抽取 + 真实状态驱动
+
+- **monitor.rs 抽取**(app.rs 拆分建议第一块落地):新建 `src-tauri/src/monitor.rs`——`SystemInfo` 结构/共享缓存 `AppState`/轮询线程/系统信息命令(`get_system_info`/`get_cpu_usage`/`get_memory_info`)整体迁入;`start_monitor(app) -> mpsc::Receiver<MonitorEvent>` 返回事件接收端。app.rs 瘦身:只留窗口控制命令 + 托盘 + 入口注册,命令以 `monitor::xxx` 注册;lib.rs 注册 `pub mod monitor;`。
+- **阈值告警 + 滞回**:CPU>85%(`MO_CPU_OVERLOAD_THR` 可配)或内存>90%(`MO_MEM_OVERLOAD_THR`)→ 过载;持续超阈值 3s(`MO_ENTER_OVERLOAD_MS`)确认进入、持续低于 5s(`MO_EXIT_OVERLOAD_MS`)确认退出(期间任一采样不满足即重置计时,防微波动抖动);进入/退出各发一次 `OverloadStarted`/`OverloadEnded`,每秒发 `Sample`(含瞬时负载档位 Low/Mid/Overload)。
+- **真实状态驱动**(pet_render/mod.rs,替换演示随机模式):状态驱动 timeout 每秒消费 monitor 事件——过载 → overload 警示(jumping 行快速循环 + 急促呼吸,overload 状态 sprite.rs 早已就绪只缺驱动);低负载保持 idle 为主自然节奏(权重池 `[thinking:3,working:1,waving:1,jumping:1]`),中负载 working 权重提高(`[thinking:3,working:3,...]`);`MO_DEMO=1` 回退旧演示状态机(调试 fallback,不删)。
+- **警示动画**:overload 时 draw 回调叠加红色脉冲边框(AtomicBool 标志共享,纯 cairo stroke,渲染器核心 sprite.rs 零改动)。
+- **系统通知**:notify-rust(zbus 纯 Rust,无系统库)进入过载时发桌面通知(本机 niri 由 noctalia-shell 提供 `org.freedesktop.Notifications`);`MO_NOTIFY=0` 关闭;通知失败(无 daemon)静默忽略,宠物动画是主通道。
+- **与计划的差异**:① 通知用 notify-rust 而非 tauri-plugin-notification——纯 Rust 零系统库,monitor 线程直接调用,不依赖前端 JS API;② 未做「点击通知回到应用」(notify-rust 无回调能力,tauri-plugin 才有;桌面宠物常驻低价值,留注释后续);③ 前端 WebKit 路径未改(usePetStatus 已按 CPU 映射状态,两条路径独立)。
+- **验证**:VM `cargo check` 0 error;`pnpm tauri build --no-bundle` 出 release 二进制;本机运行 + 故意 `yes > /dev/null` 压 CPU → 约 3~8s 后宠物切 overload(跳跃动画 + 红边)+ 桌面通知,杀 yes 后约 5s 回 idle;截图 `/tmp/mo-p15-*.png`。
+
 **P1 完成标准**:宠物可弹出独立窗、可拖拽、状态渲染流畅、超阈值会告警、点击有反馈。
 **穿插建议**:P1-2 与 P1-1 的拖拽逻辑可合并实现;P1-3 依赖素材,素材不到位时先做 P1-4/P1-6。
-**app.rs 拆分**(DEV.md 弱点 #1)建议在 P1-5 做 monitor.rs 抽取时一并完成(monitor/tray/window/commands 四件套),避免单独一次大重构。
+**app.rs 拆分**(DEV.md 弱点 #1):**已部分落地(P1-5,2026-08-09)——monitor.rs 已抽出**;tray.rs/window.rs 按需再拆。
 
 ---
 

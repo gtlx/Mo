@@ -33,6 +33,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # pkg-config gtk-layer-shell-0)由 gtk-layer-shell-sys 自动链接。
 # v0_6 feature:启用 set_keyboard_mode(KeyboardMode::None 排除键盘)。
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
+# ── P1-5 阈值告警系统通知 ──
+# notify-rust:Linux 桌面通知(org.freedesktop.Notifications)。用 zbus
+# 后端(纯 Rust,无 libdbus 系统库依赖);通知 daemon 缺失时 show() 报错
+# 被静默忽略,不影响主通道(宠物警示动画)。env MO_NOTIFY=0 可关闭。
+notify-rust = { version = "4", default-features = false, features = ["z"] }
 
 [profile.release]
 panic = "abort"

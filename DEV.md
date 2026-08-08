@@ -202,7 +202,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 | 文件 | 职责 |
 |---|---|
-| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ 演示状态序列 |
+| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ **状态驱动**(P1-5:消费 monitor.rs 事件驱动真实状态,`MO_DEMO=1` 回退演示状态机;overload 红边警示) |
 | `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
 | `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/**交叉淡入 220ms**(2026-08-09 修复「从上往下卡一下」:旧「从 0 渐显」切换瞬间画面闪没,改旧帧定格淡出+新帧淡入)/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
 | `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
@@ -238,13 +238,22 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 - **启动 env**:`GDK_BACKEND=wayland`(layer-shell 仅 Wayland 有效);Rust 模式无 webview,`WEBKIT_DISABLE_DMABUF_RENDERER` 非必需。
 - **niri 下验证注意**:layer-shell 窗口**不在 `niri msg windows` 列表**(不是 xdg toplevel),位置由合成器按锚点+margin 决定(左上角 24,24 逻辑坐标)。查层用 `niri msg layers`;截图按锚点位置直接算(逻辑坐标 × 屏幕缩放)。
 
+#### 系统监测与阈值告警(monitor.rs,P1-5 落地,2026-08-09)
+
+> 按 PLAN.md 遗留建议,app.rs 拆分的第一块 = monitor 抽取:系统信息结构/共享缓存/轮询线程/系统信息命令从 app.rs 整体迁到新建 `src-tauri/src/monitor.rs`。app.rs 现在只留窗口控制命令 + 托盘 + 入口注册。
+
+- **职责**(monitor.rs):① 后台线程每秒轮询 CPU/内存(sysinfo)→ 写共享缓存 `AppState`(前端命令 `get_system_info`/`get_cpu_usage`/`get_memory_info` 只读缓存,不做同步 IO);② **阈值判断**:CPU > 85%(env `MO_CPU_OVERLOAD_THR`)或内存 > 90%(env `MO_MEM_OVERLOAD_THR`)→ 过载;③ **滞回防抖**:持续超阈值 `MO_ENTER_OVERLOAD_MS`(默认 3000ms)才确认进入,持续低于阈值 `MO_EXIT_OVERLOAD_MS`(默认 5000ms)才确认退出——期间任一采样不满足即重置计时,数据微波动不会抖动;④ **事件通知**:`start_monitor(app) -> mpsc::Receiver<MonitorEvent>`,经 channel 发 `Sample`(每秒,含瞬时负载档位 Low/Mid/Overload)/`OverloadStarted`/`OverloadEnded`(滞回确认后各一次)。
+- **订阅方 = 宠物渲染器**:`MO_PET_MODE=rust` 时 `app.rs` 把 receiver 传给 `spawn_pet_window`,mod.rs 状态驱动每秒消费事件;WebKit 路径不订阅(drop receiver,monitor 线程 send 返回 Err 被忽略,缓存写入不受影响)。
+- **系统通知**:进入过载时经 notify-rust(zbus 后端,纯 Rust)发 Linux 桌面通知(`org.freedesktop.Notifications`;niri 环境由 noctalia-shell 提供)。env `MO_NOTIFY=0` 关闭;通知失败(无 daemon)静默忽略——**宠物警示动画是主通道,通知是补充**。
+- **阈值可配**(env):`MO_CPU_OVERLOAD_THR`(85)/`MO_MEM_OVERLOAD_THR`(90)/`MO_CPU_MID_THR`(40,中负载分界,供状态驱动选权重池)/`MO_ENTER_OVERLOAD_MS`(3000)/`MO_EXIT_OVERLOAD_MS`(5000)。
+
 #### MO_PET_MODE 开关与运行方式
 
 - 启动(Rust 路径,不依赖 WebKit/WebView):`env MO_PET_MODE=rust GDK_BACKEND=wayland /path/to/release/desktop-pet`
   - niri/Wayland 下必须带 `GDK_BACKEND=wayland`(layer-shell 协议仅 Wayland 可用;X11 下 GTK3 RGBA visual 会强制 CSD 白标题栏);
   - 素材覆盖:`MO_PET_DIR=<目录>` 从磁盘读 pet.json + spritesheet.png;`MO_PET_SCALE=<f64>` 覆盖显示缩放(渲染器尺寸 = 帧尺寸 × scale,qqpet-codex 默认 192×208 × 0.4 ≈ 77×83);
   - 验证放大:`MO_PET_SCALE=2.0` → 384×416 窗口,左上锚定,便于定位/截图。
-- 演示状态机(2026-08-09 节奏自然化,修复「切换太快」):`DEMO_STATES` 权重池 `[("thinking",3), ("working",2), ("waving",1), ("jumping",1)]`——**idle 为主**(每次发呆 8~15s 随机,30% 概率再延长 4~8s),动作偶发(2~4s,waving 固定 1.8s),动作到期必回 idle(旧逻辑缺此分支会永久卡在动作状态);权重 = 切换「理由」,thinking 最常、跳跃/挥手偶发。状态切换平滑由 sprite.rs 交叉淡入(220ms)保证。后续由面板事件驱动真实状态。
+- 状态驱动(2026-08-09 P1-5,替换原演示状态机):消费 monitor.rs 事件——`OverloadStarted`(CPU>85% 或 内存>90% 持续 3s)→ 切 **overload 警示动画**(sprite.rs 的 overload → jumping 行快速循环 + 急促呼吸,叠加 mod.rs draw 回调的**红色脉冲边框**),持续警示直到 `OverloadEnded`(持续低于阈值 5s)→ 回 idle;`Sample` 每秒更新负载档位——**低负载**(cpu < 40%)保持 idle 为主的悠闲节奏(权重池 `[thinking:3, working:1, waving:1, jumping:1]`),**中负载** working 权重提高到 `[thinking:3, working:3, waving:1, jumping:1]`(宠物「认真起来」)。自然节奏保留(2026-08-09 修复「切换太快」):idle 为主(8~15s 随机,30% 概率再发呆),动作偶发(2~4s,waving 1.8s),动作到期必回 idle。**调试开关 `MO_DEMO=1` 回退旧演示状态机**(不看真实数据,权重池固定 `[thinking:3, working:2, waving:1, jumping:1]`),便于纯动画调试。
 
 #### 与 WebKit 路径并存说明
 
@@ -259,7 +268,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 | # | 问题 | 现状 | 建议 |
 |---|---|---|---|
-| 1 | `app.rs` 职责过载 | 命令、监测线程、托盘、窗口控制、入口全在一个文件 | 拆分为 `monitor.rs`(轮询)、`tray.rs`(托盘)、`window.rs`(窗口)、`commands/`(命令),`app.rs` 只做注册 |
+| 1 | `app.rs` 职责过载 | 命令、监测线程、托盘、窗口控制、入口全在一个文件 | **已部分落地(P1-5,2026-08-09)**:监测逻辑已抽到 `monitor.rs`(轮询/缓存/阈值告警/系统信息命令),`app.rs` 只剩窗口控制命令 + 托盘 + 注册。剩余可拆:`tray.rs`(托盘)、`window.rs`(窗口控制命令),按需再做 |
 | 2 | `types/index.ts` 的 `PetState` 未使用 | Pet.tsx 用内联 `PetStatus` | 统一类型,删除死代码 |
 | 3 | `styles.css` 单文件 | 靠注释分区 | 按组件拆文件(可选,现分区注释尚可) |
 | 4 | 前后端类型双份定义 | Rust/Typescript 各一份 `SystemInfo` | 小项目可接受,不做 codegen |
