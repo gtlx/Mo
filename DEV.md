@@ -188,7 +188,7 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 - CpuBubble.tsx 对最近 5 次采样做滑动平均(`SMOOTH_WINDOW = 5`)后再显示,数字稳定不随单次采样大幅跳动;宠物主体状态判定(usePetStatus)仍用原始值,滑动平均只影响气泡展示。
 
-### 2.7 Rust 原生渲染(方案D,2026-08-08 阶段1落地 + 阶段2清底收尾)
+### 2.7 Rust 原生渲染(方案D,2026-08-08 阶段1落地 + 阶段2清底 + 2026-08-09 layer-shell 集成)
 
 > 背景:2.6 节结论——透明窗口卡在 **WebKitGTK 内容层 alpha 合成硬伤**(Wayland/X11 两路 webview 内容层均不透明,灰底 (80,80,80))。方案D = 渲染下沉 Rust:窗口内容由 Rust 侧自绘 RGBA 像素缓冲,完全绕开 WebKit,从根上消除「内容层不合成 alpha」问题。
 
@@ -197,13 +197,12 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 - **双渲染路径共存**,由环境变量 `MO_PET_MODE` 切换(app.rs setup):
   - `MO_PET_MODE=rust`(未设/其他值不触发)→ `pet_render::spawn_pet_window(app)` 创建 GTK 原生宠物窗口,不创建任何 Webview;monitor 线程 + 系统托盘照常启动。
   - 默认(未设置)→ 现有 WebKit 路径(WebviewWindowBuilder 显式透明),行为不变。**两条路径并存,互不删除**;面板/设置等 React UI 后续阶段在 WebKit 窗口或 layer-shell 面板窗口呈现。
-- 阶段1 只做「Rust 宠物窗口 + 演示动画循环」,面板(React)尚未挂到 Rust 窗口——demo 状态序列(见下)证明 set_state + 动画循环工作。
 
 #### pet_render 模块结构(src-tauri/src/pet_render/,5 文件)
 
 | 文件 | 职责 |
 |---|---|
-| `mod.rs` | 窗口创建(`spawn_pet_window`)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ 演示状态序列 |
+| `mod.rs` | 窗口创建(`spawn_pet_window`)+ **layer-shell 提升**(Overlay 层)+ 透明 GTK 窗口(DrawingArea 自绘)+ 动画循环(glib timeout 16ms 驱动 tick→draw)+ 演示状态序列 |
 | `renderer.rs` | `PetRenderer` 统一接口(与前端 `src/renderers/types.ts` 对齐):`size`/`set_state`/`tick`/`render`;`RenderFrame` = RGBA8 直通缓冲(straight alpha) |
 | `sprite.rs` | `SpriteRenderer`:精灵图裁帧 → RGBA 缓冲,对齐前端「自然动效」四要素(分层状态机/呼吸/眨眼/淡入 180ms/easeInOutSine);**纯内部时钟**(tick 喂 dt),不依赖外部时间源 |
 | `manifest.rs` | pet.json 协议解析(serde,camelCase,与前端 PetManifest 字段一致,可选字段带默认值) |
@@ -211,30 +210,41 @@ useSystemInfo(2s) → 信息面板:CPU + 内存
 
 **透明实现原理**(mod.rs 头注释,绕开 WebKit 的三层):
 1. 内容层:渲染器直接产出 RGBA8 像素缓冲(透明像素 alpha=0),不经 WebKit;
-2. 窗口层:GTK 窗口 `app_paintable` + RGBA visual + `set_decorated(false)` + `skip_taskbar` + `keep_above`;
+2. **窗口层(2026-08-09 起):gtk-layer-shell 把窗口提升为 wlr-layer-shell 表面(Overlay 层)**,合成器按 ARGB 直接混合,不走普通 toplevel 的主题背景填充路径;
 3. blit:draw 回调把 RGBA(straight)→ cairo ARGB32(预乘)一次贴图。
 
-**阶段1 实测结论(2026-08-08,如实)**:窗口层透明**已达成**(四角圆角外透出下层,ARGB 表面混合生效、无边框/无标题栏/置顶均验证);**内容层透明未达成**——GTK 主题背景先填充了 DrawingArea,企鹅 blit 在主题背景上(默认主题 (80,80,80) 灰;`GTK_THEME=Adwaita:light` 后变 (78,201,176),实锤主题背景填充,与 WebKitGTK alpha 无关)。**待修(阶段2,一行)**:draw 回调开头 `cr.set_operator(cairo::Operator::Source)` + `set_source_rgba(0,0,0,0)` + `paint()` 清透明,或对 DrawingArea 设 `background: transparent` CSS。
+#### 阶段1/2 结论(2026-08-08,历史记录)
 
-**阶段2 结论(2026-08-08,清底修复完成)**:内容层透明**完全达成**。
+- **阶段1**:窗口层透明达成(四角圆角外透出下层),但内容层被 GTK 主题背景填充(默认 (80,80,80) 灰;`GTK_THEME=Adwaita:light` 变薄荷绿 (78,201,176),实锤主题背景填充)。
+- **阶段2**:draw 回调开头 `Operator::Source` + 全透明 paint 清底 → 可控环境(移走下层窗口)下验证透明达成;但**用户真实桌面复核:背景仍是纯色薄荷绿方差 0,透明未达成**(Pitfall 35)——CSS provider 强制透明实测无效(红色测试都不生效)。
+- **CSS provider 尝试已移除(2026-08-09)**:实测无效,代码清理为注释说明。
 
-- **修复方式(已落地,git diff 确认)**:draw 回调开头加三段——`cr.set_operator(cairo::Operator::Source)`(直接覆盖目标含 alpha,不做混合)→ `cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)` + `cr.paint()`(全透明抹掉 GTK 主题背景)→ 恢复 `Operator::Over`(企鹅边缘半透明像素需正常混合)。VM `cargo check` + release 构建 0 error。
-- **实测证据**:移走下层的 Hermes 窗口后,Mo 窗口区域与下层壁纸色完全一致、无灰底 → 内容层透明达成(不再有任何主题背景残留)。
-- **「灰底」误判澄清**:阶段1 判定内容层 (80,80,80) 灰需区分两种情况——① GTK 主题背景填充(经 `GTK_THEME=Adwaita:light` 换肤变薄荷绿实锤,真实存在,阶段2 已清除);② 内容层透明后,企鹅窗口区域透出的是**下层窗口内容**(如 Hermes 深色 UI),容易被误读为「灰底」——用「移走/比对下层窗口」即可区分:下层=壁纸色即证明透明。另:上一轮验证两帧截图 diff=0 的歧义,是窗口遮住下层静态内容导致的验证方法问题,不是透明问题。
-- **阶段2 干净验证补做(2026-08-08 晚,环境受限如实报告)**:尝试按三要素(企鹅像素/四周透出下层/两帧动画差异)补一轮干净截图验证,但**屏幕处于空闲自动锁屏**(noctalia-shell 经 ext-session-lock 提供锁屏,普通窗口全部不可见;`niri msg focused-window` 返回无焦点;无独立 lock 进程可杀,杀 qs 会连壁纸/bar/dock 一起毁)→ grim 只能截到锁屏 UI,**像素级三要素验证受阻**。已确认的进程级证据:release 二进制(`MO_PET_MODE=rust GDK_BACKEND=wayland MO_PET_SCALE=3.0`)运行 6 分钟无崩溃、窗口正常创建于 niri(576×624 浮层)、CPU 持续 ~3.9%(glib 16ms 动画循环活跃,即动画在跑)。解锁后补验命令:启动 → `niri msg windows` 查窗口位置 → `grim -g "x,y WxH"` 截两帧(间隔 3s)→ 移走/杀掉窗口再截同区域对比企鹅四周透出下层。验证流程同 Pitfall 27 像素级验证法。
+#### ★ layer-shell 集成(2026-08-09,透明根治)
+
+- **依赖**:`gtk-layer-shell = { version = "0.8", features = ["v0_6"] }`(0.8.2,依赖 gtk ^0.18 兼容;v0_6 启用 `set_keyboard_mode`)。系统库 `libgtk-layer-shell` 0.10.1 已装(VM,pkg-config `gtk-layer-shell-0`),`gtk-layer-shell-sys` 自动链接。
+- **提升代码**(window 创建 + RGBA visual 之后、show 之前,mod.rs 2.5 节):
+  ```rust
+  let layer_window = window.upcast_ref::<gtk::Window>();
+  LayerShell::init_layer_shell(layer_window); // 0.8.x 无 for_window,用 init_layer_shell
+  layer_window.set_layer(gtk_layer_shell::Layer::Overlay);   // 悬浮所有窗口之上(含全屏)
+  layer_window.set_anchor(gtk_layer_shell::Edge::Left, true); // 左上锚 + margin 定位
+  layer_window.set_anchor(gtk_layer_shell::Edge::Top, true);
+  layer_window.set_layer_shell_margin(gtk_layer_shell::Edge::Left, 24);
+  layer_window.set_layer_shell_margin(gtk_layer_shell::Edge::Top, 24);
+  layer_window.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None); // 不抢键盘
+  layer_window.set_exclusive_zone(0); // 不占布局空间
+  ```
+- **API 坑(0.8.2 实测)**:`for_window` 已改名 `init_layer_shell`(trait 方法,须 `use gtk_layer_shell::LayerShell` 导入 trait);`set_keyboard_mode` 需 `v0_6` feature;trait 方法参数是 `&gtk::Window`(upcast_ref 结果直接传,勿再取 `&`);wlr-layer-shell 协议无 `set_keep_above`(Overlay 层天然置顶,GTK 层 `set_keep_above(true)` 保留兜底)。
+- **启动 env**:`GDK_BACKEND=wayland`(layer-shell 仅 Wayland 有效);Rust 模式无 webview,`WEBKIT_DISABLE_DMABUF_RENDERER` 非必需。
+- **niri 下验证注意**:layer-shell 窗口**不在 `niri msg windows` 列表**(不是 xdg toplevel),位置由合成器按锚点+margin 决定(左上角 24,24 逻辑坐标)。查层用 `niri msg layers`;截图按锚点位置直接算(逻辑坐标 × 屏幕缩放)。
 
 #### MO_PET_MODE 开关与运行方式
 
-- 启动(Rust 路径,不依赖 WebKit/WebView):`env MO_PET_MODE=rust /path/to/release/desktop-pet`
-  - niri/Wayland 下推荐仍带 `GDK_BACKEND=wayland`(X11 下 GTK3 RGBA visual 会强制 CSD 白标题栏,属已知 Pitfall 22 同类问题);
-  - 素材覆盖:`MO_PET_DIR=<目录>` 从磁盘读 pet.json + spritesheet.png;`MO_PET_SCALE=<f64>` 覆盖显示缩放;
-  - 渲染器尺寸 = 帧尺寸 × scale(qqpet-codex 默认 192×208 × 0.4 ≈ 77×83 窗口)。
+- 启动(Rust 路径,不依赖 WebKit/WebView):`env MO_PET_MODE=rust GDK_BACKEND=wayland /path/to/release/desktop-pet`
+  - niri/Wayland 下必须带 `GDK_BACKEND=wayland`(layer-shell 协议仅 Wayland 可用;X11 下 GTK3 RGBA visual 会强制 CSD 白标题栏);
+  - 素材覆盖:`MO_PET_DIR=<目录>` 从磁盘读 pet.json + spritesheet.png;`MO_PET_SCALE=<f64>` 覆盖显示缩放(渲染器尺寸 = 帧尺寸 × scale,qqpet-codex 默认 192×208 × 0.4 ≈ 77×83);
+  - 验证放大:`MO_PET_SCALE=2.0` → 384×416 窗口,左上锚定,便于定位/截图。
 - 演示状态序列 `DEMO_STATES = ["idle", "waving", "thinking", "working", "jumping"]` 周期切换,证明状态机 + 动画循环工作;后续由面板事件驱动。
-
-#### layer-shell 后续接入点(2026-08-08 实测)
-
-- gtk-layer-shell crate 与 Cargo.lock 的 gtk 0.18 版本兼容,但需要系统库 libgtk-layer-shell(VM 编译机缺且 sudo 需密码装不了)→ 阶段1 降级为普通无边框窗口 + ARGB 自绘。
-- 接入点已留:`window.upcast_ref::<gtk::Window>()` 拿到 GTK 窗口后调 `gtk_layer::LayerShell::for_window(...)` 提升即可(poe2-overlay 先例);overlay 层语义(悬浮全屏之上/穿透点击)后续补。
 
 #### 与 WebKit 路径并存说明
 

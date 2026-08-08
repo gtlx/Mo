@@ -4,18 +4,18 @@
 // 透明实现原理(绕开 WebKitGTK alpha 硬伤,本阶段核心):
 //   1. 内容层:渲染器直接产出 RGBA8 像素缓冲(透明像素 alpha=0),
 //      不经 WebKit,不存在「内容层不合成 alpha」的问题;
-//   2. 窗口层:GTK 窗口 app_paintable + RGBA visual + 无边框 +
-//      keep_above + skip_taskbar;Wayland 下合成器混合 ARGB 表面;
+//   2. 窗口层:gtk-layer-shell 把窗口提升为 wlr-layer-shell 表面
+//      (Overlay 层),合成器按 ARGB 直接混合,不走普通 toplevel
+//      的 GTK 主题背景填充路径 → 透明根治;
 //   3. blit:draw 回调把 RGBA 转成 cairo ARGB32(预乘)一次贴图。
 //
-// layer-shell 说明(2026-08-08 实测):
-//   gtk-layer-shell crate 与 Cargo.lock 的 gtk 0.18 版本兼容,
-//   但需要系统库 libgtk-layer-shell(VM 编译机缺,且 sudo 需密码
-//   无法安装)→ 本阶段降级为普通无边框窗口 + ARGB 自绘;
-//   overlay 层语义(悬浮全屏之上/穿透点击)后续补。接入点已留:
-//   window.upcast_ref::<gtk::Window>() 拿到 GTK 窗口后,
-//   调用 gtk_layer::LayerShell::for_window(...) 提升即可
-//   (poe2-overlay 先例)。
+// layer-shell 集成(2026-08-09 落地):
+//   gtk-layer-shell 0.8.2 与 gtk 0.18 兼容;系统库 libgtk-layer-shell
+//   0.10.1 已装(VM, pkg-config gtk-layer-shell-0)。
+//   niri 26.04 原生支持 zwlr_layer_surface_v1:Overlay 层悬浮所有
+//   窗口之上(含全屏),桌面宠物正确形态;KeyboardMode::None 不抢键盘。
+//   注:0.8.2 无 set_keep_above(wlr-layer-shell 协议无此概念,Overlay
+//   层天然置顶);GTK 层 window.set_keep_above(true) 保留作兜底。
 // ============================================================
 
 /// 子模块声明(渲染器协议 / 精灵图渲染 / 协议解析 / 工厂分发)
@@ -26,6 +26,7 @@ pub mod sprite;
 
 use glib::ControlFlow;
 use gtk::prelude::*;
+use gtk_layer_shell::LayerShell; // layer-shell trait(init_layer_shell/set_layer 等)
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -69,10 +70,44 @@ pub fn spawn_pet_window(app: &tauri::App) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // ── 2.5 layer-shell 提升(2026-08-09 集成,透明根治)──
+    // 普通 toplevel 窗口在 GTK3 下会被主题 CSS 预填背景(阶段2 实测
+    // (80,80,80) 灰/薄荷绿,Pitfall 35;CSS provider 强制透明实测无效,
+    // 红色测试都不生效)。layer-shell 表面由合成器按 ARGB 直接混合,
+    // 不走主题填充路径 → 根治。niri 26.04 原生支持 zwlr_layer_surface_v1:
+    // Overlay 层悬浮所有窗口之上(含全屏),桌面宠物正确形态。
+    // 参考 poe2-overlay 先例;启动需 GDK_BACKEND=wayland(运行命令已带)。
+    // 注:0.8.2 无 set_keep_above(wlr-layer-shell 协议无此概念,Overlay
+    // 层天然置顶);window.set_keep_above(true)(上方)保留作 X11 兜底。
+    {
+        // 提升前先确保 RGBA visual 已设置(layer 表面 ARGB 混合的前提)
+        let layer_window = window.upcast_ref::<gtk::Window>();
+        LayerShell::init_layer_shell(layer_window); // 提升为 layer 表面(0.8.x 无 for_window,用 init_layer_shell)
+        layer_window.set_layer(gtk_layer_shell::Layer::Overlay);
+        // 锚定四边 = 铺满屏幕(poe2-overlay 全屏 overlay 做法);
+        // 桌面宠物用「左上锚 + margin」定位,位置确定便于验证/截图。
+        layer_window.set_anchor(gtk_layer_shell::Edge::Left, true);
+        layer_window.set_anchor(gtk_layer_shell::Edge::Top, true);
+        layer_window.set_layer_shell_margin(gtk_layer_shell::Edge::Left, 24);
+        layer_window.set_layer_shell_margin(gtk_layer_shell::Edge::Top, 24);
+        // 自动排除键盘:桌面宠物不抢焦点/输入(KeyboardMode::None 默认,
+        // 显式声明语义);exclusive_zone=0 不占布局空间(不推挤其他窗口)。
+        layer_window.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
+        layer_window.set_exclusive_zone(0);
+        log::info!("[pet_render] layer-shell 提升完成:Overlay 层,左上锚+24px margin");
+    }
+
     // ── 3. DrawingArea:内容层(ARGB 像素贴图)──
     let area = gtk::DrawingArea::new();
     area.set_size_request(w as i32, h as i32);
     window.add(&area);
+
+    // ── 3.5 背景透明说明(2026-08-09 更新)──
+    // 阶段2 曾尝试 CSS provider(window/drawingarea background: transparent)
+    // 强制透明——实测无效(红色测试都不生效,Pitfall 35,已移除)。
+    // 透明由两条保证:① layer-shell Overlay 表面按 ARGB 混合(上方 2.5);
+    // ② draw 回调开头 Operator::Source 全透明清底(下方),抹掉 GTK 主题
+    // 在 widget 绘制前可能填的背景。两者缺一不可。
 
     let renderer = Arc::new(Mutex::new(renderer));
 
@@ -96,6 +131,39 @@ pub fn spawn_pet_window(app: &tauri::App) -> Result<(), Box<dyn Error>> {
         let (fw, fh) = (frame.width as i32, frame.height as i32);
         if fw <= 0 || fh <= 0 {
             return glib::Propagation::Proceed;
+        }
+
+        // ── 诊断(阶段2 bug 排查):每 30 帧打印渲染统计 + area 实际尺寸 ──
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static DIAG_N: AtomicU32 = AtomicU32::new(0);
+            let n = DIAG_N.fetch_add(1, Ordering::Relaxed);
+            if n % 30 == 0 {
+                let mut opaque = 0u32;
+                let mut min_x = fw;
+                let mut min_y = fh;
+                let mut max_x = -1i32;
+                let mut max_y = -1i32;
+                for y in 0..fh {
+                    for x in 0..fw {
+                        let si = ((y * fw + x) * 4) as usize;
+                        if frame.pixels[si + 3] > 0 {
+                            opaque += 1;
+                            if x < min_x { min_x = x; }
+                            if x > max_x { max_x = x; }
+                            if y < min_y { min_y = y; }
+                            if y > max_y { max_y = y; }
+                        }
+                    }
+                }
+                let alloc = _area.allocation();
+                eprintln!(
+                    "[DIAG] frame={}x{} opaque_px={} bbox=({},{})-({},{}) area_alloc={}x{} area_req={}x{}",
+                    fw, fh, opaque, min_x, min_y, max_x, max_y,
+                    alloc.width(), alloc.height(),
+                    _area.size_request().0, _area.size_request().1
+                );
+            }
         }
 
         // RGBA8(straight alpha)→ cairo ARGB32(预乘,小端内存序 B,G,R,A)
