@@ -22,6 +22,7 @@
 pub mod factory;
 pub mod manifest;
 pub mod renderer;
+pub mod roam;
 pub mod sprite;
 
 use glib::ControlFlow;
@@ -65,6 +66,10 @@ const POPUP_POS_FILE: &str = "popup-pos.json";
 /// 默认弹出位置 = 主窗(layer 左上锚 + 24px margin)右侧
 const POPUP_DEFAULT_X: f64 = 24.0;
 const POPUP_DEFAULT_GAP: f64 = 12.0;
+
+/// 漫游(roam.rs):弹出窗自动在桌面走动——随机目标/平滑步进/边界 clamp/
+/// 到达停留 5~15s/拖拽暂停,移动走 niri IPC move-floating-window,
+/// 详见 roam.rs 模块头注释(漫游只作用于弹出窗,主窗 layer 无法被移动)。
 
 /// 演示状态池(证明 set_state + 动画循环工作;`MO_DEMO=1` 时启用)。
 /// 每项 = (状态名, 权重)。自然节奏设计(2026-08-09 修复「切换太快」):
@@ -319,6 +324,13 @@ pub fn spawn_pet_window(
     let areas: Arc<Mutex<Vec<gtk::DrawingArea>>> =
         Arc::new(Mutex::new(vec![area.clone()]));
 
+    // ── 3.65 漫游状态(P1-1 最后一项:弹出窗桌面漫游)──
+    // 漫游只作用于弹出窗(普通 toplevel,可被 niri IPC 移动);主窗是
+    // layer-shell Overlay 表面,不在 niri msg windows 列表,查不到
+    // 位置/ID → 无法被 niri 移动(见 roam.rs 模块头注释)。这里只创建
+    // 实例,供 toggle(启停)/拖拽(暂停恢复)/漫游时钟(注册)接线。
+    let roam_state = Arc::new(roam::RoamState::new());
+
     // draw 回调:渲染一帧 → RGBA(straight)→ ARGB32(预乘)→ blit
     // P1-1:绘制逻辑抽到 draw_pet_frame,主窗与弹出窗共用(同一渲染器
     // 实例,两窗画面同步;GTK 主线程串行,无锁竞争)。
@@ -339,6 +351,8 @@ pub fn spawn_pet_window(
     let popup_btn = Arc::clone(&popup_state);
     let shared_btn = Arc::clone(&shared);
     let areas_btn = Arc::clone(&areas);
+    // P1-1 漫游:双击 toggle 时启停弹出窗漫游(传入同一 RoamState)
+    let roam_btn = Arc::clone(&roam_state);
     area.connect_button_press_event(move |_a, ev| {
         if ev.button() != 1 {
             return glib::Propagation::Proceed; // 只响应左键(右键留给未来菜单)
@@ -352,7 +366,14 @@ pub fn spawn_pet_window(
                 "[pet_render] 双击 → greet 挥手({:.0}ms) + 弹出窗 toggle",
                 PET_GREET_MS
             );
-            toggle_popup(&popup_btn, &shared_btn, &areas_btn, w as i32, h as i32);
+            toggle_popup(
+                &popup_btn,
+                &shared_btn,
+                &areas_btn,
+                &roam_btn,
+                w as i32,
+                h as i32,
+            );
         } else {
             // 单击 → 抚摸反馈:撒娇 waving + 飘爱心,共 1.5s
             interact_btn.store(now + PET_INTERACT_MS as u64, Ordering::Relaxed);
@@ -363,6 +384,16 @@ pub fn spawn_pet_window(
             );
         }
         glib::Propagation::Stop
+    });
+
+    // ── 3.8 漫游时钟(P1-1 最后一项:弹出窗桌面漫游)──
+    // 独立于动画循环(16ms):每 ROAM_INTERVAL_MS(160ms)驱动一次漫游
+    // 状态机(tick)。弹出窗未显示时 active=false,tick 直接返回,开销
+    // 可忽略;显示期间:查询位置 → 选目标/步进 → niri IPC 增量移动。
+    let roam_loop = Arc::clone(&roam_state);
+    glib::timeout_add_local(Duration::from_millis(roam::ROAM_INTERVAL_MS), move || {
+        roam_loop.tick();
+        ControlFlow::Continue
     });
 
     // ── 4. 动画循环:glib timeout 驱动 tick + 所有窗口 queue_draw ──
@@ -681,6 +712,7 @@ fn draw_pet_frame(cr: &cairo::Context, shared: &PetShared, _area: &gtk::DrawingA
 fn spawn_popup_window(
     shared: &Arc<PetShared>,
     areas: &Arc<Mutex<Vec<gtk::DrawingArea>>>,
+    roam: &Arc<roam::RoamState>,
     w: i32,
     h: i32,
 ) -> gtk::Window {
@@ -715,20 +747,28 @@ fn spawn_popup_window(
     // 拖拽:按下左键 → 合成器接管(begin_move_drag,Wayland 正统)。
     // 弹出窗无单击/双击交互(拖拽是唯一用途),按下即拖,不区分
     // 单击/双击(参考阶段3 侦察结论:Pitfall 33 设计取舍)。
+    // 漫游共存:拖拽开始暂停漫游(paused=true),释放恢复——避免
+    // 「漫游 IPC 移动 + 合成器拖拽」叠加冲突(对齐 roam.ts 的
+    // pointerdown/pointerup pause/resume 设计)。
     let win_drag = window.clone();
+    let roam_drag = Arc::clone(roam);
     area.connect_button_press_event(move |_a, ev| {
         if ev.button() == 1 {
             let (rx, ry) = ev.root();
             win_drag.begin_move_drag(1, rx as i32, ry as i32, ev.time());
-            eprintln!("[pet_render] 弹出窗拖拽开始(begin_move_drag)");
+            roam_drag.set_paused(true); // 拖拽中暂停漫游
+            eprintln!("[pet_render] 弹出窗拖拽开始(begin_move_drag),漫游暂停");
         }
         glib::Propagation::Stop
     });
 
-    // 拖拽结束 → 延迟查询实际位置并持久化(合成器接管移动后,
-    // niri 需要一点时间更新坐标;button-release 时位置已定,
-    // 延迟 500ms 再查更稳)
+    // 拖拽结束 → 恢复漫游 + 延迟查询实际位置并持久化(合成器接管
+    // 移动后,niri 需要一点时间更新坐标;button-release 时位置已定,
+    // 延迟 500ms 再查更稳)。漫游恢复后下个 tick 从 niri 重新查询
+    // 当前位置,以拖拽后的新位置为起点继续走,无跳变。
+    let roam_rel = Arc::clone(roam);
     area.connect_button_release_event(move |_a, _ev| {
+        roam_rel.set_paused(false); // 拖拽结束恢复漫游
         save_popup_pos_delayed();
         glib::Propagation::Stop
     });
@@ -748,6 +788,7 @@ fn toggle_popup(
     state: &Arc<Mutex<PopupState>>,
     shared: &Arc<PetShared>,
     areas: &Arc<Mutex<Vec<gtk::DrawingArea>>>,
+    roam: &Arc<roam::RoamState>,
     w: i32,
     h: i32,
 ) {
@@ -757,19 +798,22 @@ fn toggle_popup(
             if st.visible {
                 win.hide();
                 st.visible = false;
-                eprintln!("[pet_render] 弹出窗收起(hide)");
+                roam.stop(); // 收起 → 停止漫游
+                eprintln!("[pet_render] 弹出窗收起(hide),漫游停止");
             } else {
                 win.show_all();
                 st.visible = true;
                 eprintln!("[pet_render] 弹出窗重新显示");
                 restore_popup_pos(w);
+                roam.start(w as f64, h as f64); // 显示 → 启动漫游
             }
         }
         None => {
-            let win = spawn_popup_window(shared, areas, w, h);
+            let win = spawn_popup_window(shared, areas, roam, w, h);
             st.window = Some(win.clone());
             st.visible = true;
             restore_popup_pos(w);
+            roam.start(w as f64, h as f64); // 首次弹出 → 启动漫游
         }
     }
 }
@@ -892,46 +936,63 @@ fn query_niri_window(title: &str) -> Option<(u64, f64, f64)> {
 }
 
 /// 经 niri IPC 把弹出窗增量移动到目标位置(绝对坐标换算增量)。
+/// 实际 IPC 走 move_popup_by(漫游与位置恢复共用同一增量移动通道)。
+fn move_popup_to(target: &PopupPos) {
+    if let Some((_id, cx, cy)) = query_niri_window(POPUP_TITLE) {
+        move_popup_by(target.x - cx, target.y - cy);
+    } else {
+        eprintln!("[pet_render] 未在 niri msg windows 找到弹出窗(可能尚未映射完成)");
+    }
+}
+
+/// 经 niri IPC 增量移动弹出窗(dx/dy 为逻辑坐标增量,可为负)。
 /// move-floating-window 仅对浮层窗口有效(弹出窗天然浮层 ✓);
 /// --id 精确指定(缺省=焦点窗口,弹出窗未必有焦点)。
-fn move_popup_to(target: &PopupPos) {
-    if let Some((id, cx, cy)) = query_niri_window(POPUP_TITLE) {
-        let dx = target.x - cx;
-        let dy = target.y - cy;
-        if dx.abs() < 1.0 && dy.abs() < 1.0 {
-            return; // 已到位
+/// 返回是否成功(false = 窗口不在列表/命令失败,漫游据此决定是否停止)。
+/// 漫游每片调用一次(增量语义天然适配「平滑步进」模型)。
+fn move_popup_by(dx: f64, dy: f64) -> bool {
+    if dx.abs() < 0.1 && dy.abs() < 0.1 {
+        return true; // 无位移,跳过 IPC
+    }
+    let (id, _, _) = match query_niri_window(POPUP_TITLE) {
+        Some(v) => v,
+        None => {
+            eprintln!("[pet_render] 未在 niri msg windows 找到弹出窗(可能尚未映射完成)");
+            return false;
         }
-        let dx_s = format!("{dx:+.1}");
-        let dy_s = format!("{dy:+.1}");
-        let id_s = id.to_string();
-        let out = std::process::Command::new("niri")
-            .args([
-                "msg",
-                "action",
-                "move-floating-window",
-                "--id",
-                id_s.as_str(),
-                "-x",
-                dx_s.as_str(),
-                "-y",
-                dy_s.as_str(),
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                eprintln!(
-                    "[pet_render] 弹出窗移动到 ({:.1}, {:.1}) (增量 {dx:+.1},{dy:+.1})",
-                    target.x, target.y
-                );
-            }
-            Ok(o) => eprintln!(
+    };
+    let dx_s = format!("{dx:+.1}");
+    let dy_s = format!("{dy:+.1}");
+    let id_s = id.to_string();
+    let out = std::process::Command::new("niri")
+        .args([
+            "msg",
+            "action",
+            "move-floating-window",
+            "--id",
+            id_s.as_str(),
+            "-x",
+            dx_s.as_str(),
+            "-y",
+            dy_s.as_str(),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            eprintln!("[pet_render] 弹出窗增量移动 ({dx:+.1}, {dy:+.1})");
+            true
+        }
+        Ok(o) => {
+            eprintln!(
                 "[pet_render] 移动弹出窗失败({}): {}",
                 o.status,
                 String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => eprintln!("[pet_render] 移动弹出窗失败: {e}"),
+            );
+            false
         }
-    } else {
-        eprintln!("[pet_render] 未在 niri msg windows 找到弹出窗(可能尚未映射完成)");
+        Err(e) => {
+            eprintln!("[pet_render] 移动弹出窗失败: {e}");
+            false
+        }
     }
 }
