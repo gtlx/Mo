@@ -154,6 +154,51 @@
 
 ---
 
+## P1.5 跨平台改造(2026-08-09 用户定位:Windows + Debian + 各 Linux 发行版)
+
+> 用户明确 Mo 要跨平台(不只 Arch/niri)。当前实现深度绑定 Linux Wayland/niri(gtk-layer-shell 悬浮 + niri IPC 移动),Windows 无法编译、其他发行版缺 layer-shell 支持。本节在 P2 之前完成,趁代码未膨胀先抽象平台层。
+
+### 现状耦合点(2026-08-09 扫描)
+
+| 文件 | 耦合处 | 内容 |
+|---|---|---|
+| `pet_render/mod.rs` | 57 处 🔴 | GTK 自绘、layer-shell、niri IPC、Wayland |
+| `pet_render/roam.rs` | 20 处 🔴 | niri IPC 移动窗口 |
+| `monitor.rs` | 6 处 | notify-rust(DBus,Linux 通知) |
+| `app.rs` | 1 处 | 透明窗口配置 |
+
+**前端可复用**:`src/renderers/`(精灵图)+ `src/components/` 是纯 TS,跨平台,不用动。
+
+### 改造策略:按平台抽象"窗口后端"
+
+```
+src-tauri/src/pet_render/
+├── mod.rs            → 平台无关接口(show/hide/move/位置持久化/事件)
+├── linux_gtk.rs      → #[cfg(target_os = "linux")] 现有 GTK+layer-shell 实现
+└── windows_tauri.rs  → #[cfg(target_os = "windows")] Tauri WebView 多窗口实现
+```
+
+| 平台 | 方案 | 说明 |
+|---|---|---|
+| Windows | Tauri 多窗口(tauri.conf 透明置顶 + 前端精灵图) | Windows 原生支持置顶/拖拽,走 WebView 前端路径(即最初 P1-1 计划路径) |
+| Linux/niri(现) | GTK 路径保留 | layer-shell 悬浮 + niri IPC,现状不动 |
+| Linux/GNOME-KDE(X11/Wayland 无 layer-shell) | GTK 路径降级 | 无 layer-shell 时普通置顶窗口,去掉 niri IPC 依赖 |
+| 系统信息/通知 | monitor.rs 平台适配 | Windows 用 notify-rust winrt 后端;Linux 现状 |
+
+### 任务清单
+
+| # | 任务 | 涉及文件 | 验证 |
+|---|---|---|---|
+| X1 | 抽象窗口后端 trait(show/hide/move/persist/events) | `pet_render/mod.rs` 重构 | `cargo check` 双平台 |
+| X2 | Windows Tauri 多窗口实现(透明+置顶+拖拽) | 新建 `pet_render/windows_tauri.rs`、`tauri.conf.json` | Windows `cargo check` + 桌面运行 |
+| X3 | Linux 非 niri 降级(去 layer-shell 依赖,feature 开关) | `pet_render/linux_gtk.rs`、`Cargo.toml` | Arch + VM(Debian)各跑一次 |
+| X4 | 位置持久化平台化(XDG vs %APPDATA%) | `pet_render/*` | 双平台重启位置恢复 |
+| X5 | 通知平台适配 | `monitor.rs` | Windows 通知弹出 |
+
+**工作量**:约 1-1.5 周。**注意**:P2(AI 对话)不依赖窗口层,可与 X1-X5 并行。
+
+---
+
 ## P2 AI 对话 + 记忆系统(DEV.md 第 5 节,严格执行 5.8 分步表)
 
 > DEV.md 5.8 已有完整步骤表(改动文件 + 验证),本规划只补充依赖、前置条件与验证衔接,不重复其表格。
